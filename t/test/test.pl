@@ -22,7 +22,7 @@ $gen->class('Circle',
 	},
 	subs => {
 		'calcArea():float' => q{
-			return 3.1415 * self->radius * self->radius;
+			return 3.1415 * getRadius(self) * getRadius(self);
 		},
 	},
 );
@@ -34,7 +34,7 @@ $gen->class('Square',
 	},
 	subs => {
 		'calcArea():float' => q{
-			return self->width * self->width;
+			return getWidth(self) * getWidth(self);
 		},
 	},
 );
@@ -46,10 +46,10 @@ $gen->class('Rectangle',
 	},
 	subs => {
 		'calcArea():float' => q{
-			return self->width * self->height;
+			return getWidth(self) * getHeight(self);
 		},
 		'calcOutline():float' => q{
-			return self->width * 2 + self->height * 2;
+			return getWidth(self) * 2 + getHeight(self) * 2;
 		},	
 	},
 );

@@ -6,7 +6,9 @@ use warnings;
 use Parse::RecDescent;
 #use Data::Dumper;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
+
+my $LastClassID = 0;
 
 sub new
 {
@@ -54,8 +56,14 @@ sub class
 		if exists $self->{'classes'}->{$name};
 	die "Error: classname '$name' does not qualify for a valid name\n"
 		unless $name =~ /^[A-Z][a-zA-Z0-9\_]*$/;
+	die "Error: classname must not be 'Object'\n"
+		if $name eq 'Object';
+	die "Error: classname must not be longer than 256 characters\n"
+		if length $name > 256;
 	
+	$LastClassID++;
 	my $class = {
+		'id'   => $LastClassID,
 		'name' => $name,
 		'isa'  => $opts{'isa'}  || [],
 		'attr' => $opts{'attr'} || {},
@@ -158,8 +166,13 @@ sub generate
 	$ccode .= q{
 /*----------------------------------------------------------------------------*/
 
-typedef void* ANY;
-typedef char String[255];
+typedef struct S_Object* Object;
+
+struct S_Object {
+	int classid;
+	char classname[256];
+	void* data;
+};
 
 /*----------------------------------------------------------------------------*/
 /* String functions */
@@ -175,14 +188,6 @@ int eq (char* s1, char* s2) {
 	return (strcmp(s1, s2) == 0);
 }
 
-/*----------------------------------------------------------------------------*/
-/* Runtime error function */
-
-void die (char* msg) {
-	printf("Runtime warning: %s\n", msg);
-	/* exit(1); */
-}
-
 };
 
 	##############################################################################
@@ -190,34 +195,42 @@ void die (char* msg) {
 	$ccode .= "/* Types */\n\n";
 	$ccode .= '/*------------ Defines ------------*/'."\n\n";
 	my $typedefs = '';
+	my $structs  = '';
 	foreach my $classname (keys %{$self->{'classes'}}) {
 		my $class = $self->{'classes'}->{$classname};
 		
-		$ccode .= '#define '.uc($classname).'_ATTRIBUTES '."\\\n"; 
-		$ccode .= '  char classname[256]'."; \\\n"
+		$ccode .= '#define '.uc($classname).'_ATTRIBUTES '."\\\n";
+		#$ccode .= '  int classid'."; \\\n";
+		#$ccode .= '  char classname[256]'."; \\\n"
+		#	unless scalar @{$class->{'isa'}};
+		$ccode .= '  int dummy'."; \\\n"
 			unless scalar @{$class->{'isa'}};
 		foreach my $attrname (keys %{$class->{'attr'}}) {
-			$ccode .= '  '.$class->{'attr'}->{$attrname}.' '.$attrname."; \\\n";
+			my $attrtype = $class->{'attr'}->{$attrname};
+			$ccode .= '  '.(exists $self->{'classes'}->{$attrtype} ? 'Object' : $attrtype).
+				' '.$attrname."; \\\n";
 		}
 		$ccode .= "\n";
 
-		$ccode .= '#define '.uc($classname).'_INIT(obj) '."\\\n"; 
-		$ccode .= '  setstr((('.$classname.')obj)->classname, "'.$classname.'")'."; \\\n";
+		$ccode .= '#define '.uc($classname).'_INIT(type,obj) '."\\\n";
+		#$ccode .= '  (('.$classname.')obj)->classid = '.$class->{'id'}."; \\\n";
+		#$ccode .= '  setstr((('.$classname.')obj)->classname, "'.$classname.'")'."; \\\n";
 		foreach my $attrname (keys %{$class->{'attr'}}) {
-			$ccode .= '  (('.$classname.')obj)->'.$attrname.' = 0'."; \\\n";
+			$ccode .= '  ((type)((obj)->data))->'.$attrname.' = 0'."; \\\n";
 		}
 		$ccode .= "\n";
 
 		$typedefs .= 'typedef struct S_'.$classname.'* '.$classname.';'."\n\n";
-		$typedefs .= 'struct S_'.$classname.' {'."\n";
+		$structs .= 'struct S_'.$classname.' {'."\n";
 		foreach my $parentclassname ($self->_get_parent_classes($classname)) {
-			$typedefs .= '  '.uc($parentclassname).'_ATTRIBUTES'."\n";
+			$structs .= '  '.uc($parentclassname).'_ATTRIBUTES'."\n";
 		}
-		$typedefs .= '  '.uc($classname).'_ATTRIBUTES'."\n";
-		$typedefs .= "};\n\n";
+		$structs .= '  '.uc($classname).'_ATTRIBUTES'."\n";
+		$structs .= "};\n\n";
 	}
 	$ccode .= '/*------------ Typedefs & Structs ------------*/'."\n\n";
 	$ccode .= $typedefs;
+	$ccode .= $structs;
 
 	##############################################################################
 	$ccode .= "/*-----------------------------------------------------------*/\n";
@@ -228,12 +241,17 @@ void die (char* msg) {
 	$ccode .= "/*-----------------------------------------------------------*/\n";
 	$ccode .= "/* Construction functions */\n\n";
 	foreach my $classname (keys %{$self->{'classes'}}) {
-		$ccode .= $classname.' new_'.$classname.' () {'."\n";
-		$ccode .= '  '.$classname.' obj = ('.$classname.')malloc(sizeof(struct S_'.$classname.'));'."\n";
+		my $class = $self->{'classes'}->{$classname};
+		$ccode .= 'Object new_'.$classname.' () {'."\n";
+		$ccode .= '  Object obj = (Object)malloc(sizeof(struct S_Object));'."\n";
+		$ccode .= '  obj->classid = '.$class->{'id'}.';'."\n";
+		$ccode .= '  setstr(obj->classname, "'.$classname.'");'."\n";
+		$ccode .= '  obj->data = malloc(sizeof(struct S_'.$classname.'));'."\n";
+		$ccode .= '  obj->data = malloc(sizeof(struct S_'.$classname.'));'."\n";
 		foreach my $parentclassname ($self->_get_parent_classes($classname)) {
-			$ccode .= '  '.uc($parentclassname).'_INIT(obj)'."\n";
+			$ccode .= '  '.uc($parentclassname).'_INIT('.$classname.',obj)'."\n";
 		}
-		$ccode .= '  '.uc($classname).'_INIT(obj)'."\n";
+		$ccode .= '  '.uc($classname).'_INIT('.$classname.',obj)'."\n";
 		$ccode .= '  return obj;'."\n";
 		$ccode .= '}'."\n\n";
 	}
@@ -245,33 +263,36 @@ void die (char* msg) {
 	foreach my $attrname (sort keys %{$attribs}) {
 		my $attrtype = $attribs->{$attrname};
 		
-		$getters .= $attrtype.' get'.ucfirst($attrname).' (ANY obj) {'."\n";
-		$setters .= 'void set'.ucfirst($attrname).' (ANY obj, '.$attrtype.' value) {'."\n";
-		my $first = 1;
+		$getters .= 
+			(exists $self->{'classes'}->{$attrtype} ? 'Object' : $attrtype).
+			' get'.ucfirst($attrname).' (Object obj) {'."\n";
+		$setters .= 'void set'.ucfirst($attrname).' (Object obj, '.
+			(exists $self->{'classes'}->{$attrtype} ? 'Object' : $attrtype).' value) {'."\n";
+		$getters .= '  switch (obj->classid) {'."\n";
+		$setters .= '  switch (obj->classid) {'."\n";
 		foreach my $classname ($self->_get_classnames_with_member('attr',$attrname)) {
-			$getters .= 	
-				'  '.(!$first ? 'else ' : '').'if '.
-					'(eq((('.$classname.')obj)->classname, "'.$classname.'")) {'."\n".
-				'      return (('.$classname.')obj)->'.$attrname.';'."\n".
-				'  }'."\n";
-			$setters .=
-				'  '.(!$first ? 'else ' : '').'if '.
-					'(eq((('.$classname.')obj)->classname, "'.$classname.'")) {'."\n".
+			my $class = $self->{'classes'}->{$classname};
+			$getters .=
+				'    case ('.$class->{'id'}.'):'."\n".
 				($attrname eq 'classname' ?
-					'      setstr((('.$classname.')obj)->'.$attrname.', value);'."\n" :
-					'      (('.$classname.')obj)->'.$attrname.' = value;'."\n").
-				'  }'."\n";
-			$first = 0 if $first;
+					'      return obj->classname;'."\n" :
+					'      return (('.$classname.')(obj->data))->'.$attrname.';'."\n");
+			$setters .=
+				'    case ('.$class->{'id'}.'):'."\n".
+				($attrname eq 'classname' ?
+					'      setstr(obj->classname, value);'."\n" :
+					'      (('.$classname.')(obj->data))->'.$attrname.' = value;'."\n").
+				'      break;'."\n";
 		}
 		$getters .= 	
-			'  else {'."\n".
-			'    die("Cannot apply method \'get'.ucfirst($attrname).'\' to instance");'."\n".
-			'    return 0;'."\n".
+			'    default:'."\n".
+			'      printf("Cannot apply method \'get'.ucfirst($attrname).'\' to instance of class \'%s\'\n", obj->classname);'."\n".
+			'      return 0;'."\n".
 			'  }'."\n".
 			"}\n\n";
 		$setters .= 	
-			'  else {'."\n".
-			'    die("Cannot apply method \'set'.ucfirst($attrname).'\' to instance");'."\n".
+			'    default:'."\n".
+			'      printf("Cannot apply method \'set'.ucfirst($attrname).'\' to instance of class \'%s\'\n", obj->classname);'."\n".
 			'  }'."\n".
 			"}\n\n";
 	}
@@ -319,39 +340,45 @@ void die (char* msg) {
 	my $commonfuncs = '';
 	foreach my $methsign (keys %meths) {
 		my $sign = $self->{'parser'}->signature($methsign);
+		my $returns = 
+			(exists $self->{'classes'}->{$sign->{'returns'}} ? 
+				'Object' : $sign->{'returns'});
 
 		$commonfuncs .= 
-			$sign->{'returns'}.' '.$sign->{'name'}.' (ANY obj'.
-				$self->_get_signature_ccode($sign,0).') {'."\n";
+			$returns.' '.$sign->{'name'}.' (Object obj'.
+				$self->_get_signature_ccode($sign,0).') {'."\n".
+			'  switch (obj->classid) {'."\n";
 
 		#my @provided_classes = @{$impls{$impl}};
 		#my ($implementing_class, $methsign) = split /\//, $impl;
 
 		# specific implementation of method
 		foreach my $implementing_class (keys %{$meths{$methsign}}) {
+			
 			$implsigns .=
-				$sign->{'returns'}.' '.$implementing_class.'_'.$sign->{'name'}.
-				' ('.$implementing_class.' self'.
+				$returns.' '.$implementing_class.'_'.$sign->{'name'}.
+				' (Object self'.
 				     $self->_get_signature_ccode($sign,0).');'."\n";
+			
 			$implfuncs .=
-				$sign->{'returns'}.' '.$implementing_class.'_'.$sign->{'name'}.
-				' ('.$implementing_class.' self'.
+				$returns.' '.$implementing_class.'_'.$sign->{'name'}.
+				' (Object self'.
 					$self->_get_signature_ccode($sign,0).') {'."\n".
 				$self->{'classes'}->{$implementing_class}->{'subs'}->{$methsign}."\n".
 				'}'."\n";
+			
 			foreach my $using_class (@{$meths{$methsign}->{$implementing_class}}) {
 				$commonfuncs .=
-					'  if (eq((('.$using_class.')obj)->classname, "'.$using_class.'")) {'."\n".
-					'  	return '.$implementing_class.'_'.$sign->{'name'}.
-						'(('.$implementing_class.')obj'.
-							$self->_get_signature_ccode($sign,1).');'."\n".
-					'  }'."\n";
+					'    case ('.$self->{'classes'}->{$using_class}->{'id'}.'):'."\n".
+					'  	  '.($sign->{'returns'} eq 'void' ? '' : 'return ').$implementing_class.'_'.$sign->{'name'}.
+						'(obj'.$self->_get_signature_ccode($sign,1).');'."\n".
+					($sign->{'returns'} eq 'void' ? '      break;'."\n" : '');
 			}
 		}
 		$commonfuncs .=
-			'  else {'."\n".
-			'	  die("Cannot apply method \''.$sign->{'name'}.'\' to instance");'."\n".
-			'	  return ('.$sign->{'returns'}.')0;'."\n".
+			'    default:'."\n".
+			'	    printf("Cannot apply method \''.$sign->{'name'}.'\' to instance of class \'%s\'\n", obj->classname);'."\n".
+			($sign->{'returns'} eq 'void' ? '' : '	    return ('.$returns.')0;'."\n").
 			'  }'."\n".
 			'}'."\n\n";
 	}
@@ -363,13 +390,22 @@ void die (char* msg) {
 	#          des Klassen-Typs namens "self">
 	#
 	#   <Anm.: wenn eine C-Funktion zusaetzliche Parameter hat, die
-	#          Klassen-Typen haben, so werden diese in "ANY" umgewandelt!>
+	#          Klassen-Typen haben, so werden diese in "Object" umgewandelt!>
 		
 	##############################################################################
 	$ccode .= "/*-----------------------------------------------------------*/\n";
 	$ccode .= "/* Destructor */\n\n";
 	
-	$ccode .= 'void delete (ANY obj) {'."\n";
+	$ccode .= 'void delete (Object obj) {'."\n";
+	$ccode .= '  switch (obj->classid) {'."\n";
+	foreach my $classname (keys %{$self->{'classes'}}) {
+		my $class = $self->{'classes'}->{$classname};
+		$ccode .=
+			'    case ('.$class->{'id'}.'):'."\n".
+			'      free(('.$classname.')(obj->data));'."\n".
+			'      break;'."\n";
+	}
+	$ccode .= '  }'."\n";
 	$ccode .= '  free(obj);'."\n";
 	$ccode .= "}\n\n";
 	
@@ -412,7 +448,7 @@ sub _get_signature_ccode
 	my @params = ();
 	foreach my $param (@{$sign->{'params'}}) {
 		my ($name, $type) = @{$param};
-		$type = 'ANY' if exists $self->{'classes'}->{$type};
+		$type = 'Object' if exists $self->{'classes'}->{$type};
 		push @params, ($callcode ? '' : $type.' ').$name;
 	}
 	return (scalar @params ? ', ' : '').join(', ', @params);
@@ -568,7 +604,7 @@ of class definitions to accomplish an object-oriented programming style.
     },
     subs => {
       'calcArea():float' => q{
-        return 3.1415 * self->radius * self->radius;
+        return 3.1415 * getRadius(self) * getRadius(self);
       },
     },
   );
@@ -605,7 +641,7 @@ The class() method lets you define a new class:
     },
     subs => {
       'calcArea():float' => q{
-        return 3.1415 * self->radius * self->radius;
+        return 3.1415 * getRadius(self) * getRadius(self);
       },
     },
   );
@@ -614,6 +650,9 @@ The class() method takes as first argument the name of the class.
 The name has to start with a capitol letter and may be followed
 by an arbitrary amount of letters, numbers or underscore (to be
 compatible with the ANSI C standard).
+
+The special class name I<Object> is not allowed as a classname.
+A classname must not be longer than 256 characters.
 
 After the first argument the optional parameters follow
 in any order:
@@ -676,7 +715,7 @@ Here is an example file:
   //
   @sub calcOutline():float
   
-  return self->width * 2 + self->height * 2;
+  return getWidth(self) * 2 + getHeight(self) * 2;
 
 A line starting with '//' is ignored.
 A line that starts with an '@' is treated as a class or
@@ -741,14 +780,16 @@ dictribution.
 Suppose you defined a class named 'Circle'. You can then create an
 instance of that class like so (C code):
 
-  Circle c = new_Circle();
+  Object c = new_Circle();
+
+Important: B<All class instances in C are of the type "Object">!
 
 =head3 Destruction
 
 A generic C function delete() is generated which can be used to
 destruct any object/instance:
 
-  Circle c = new_Circle();
+  Object c = new_Circle();
   delete(c); // c now points to NULL
 
 =head3 Attribute access
@@ -758,7 +799,7 @@ Suppose you defined a class named 'Circle' with an attribute
 the following:
 
   float r;
-  Circle c = new_Circle();
+  Object c = new_Circle();
   r = getRadius(c);
   
   setRadius(c, 42.0);
@@ -771,11 +812,14 @@ are to be written:
 
   calcArea(int param):float
 
+Remember: B<Always access the instance/object attributes via the
+getter or setter methods!>.
+
 =head3 Method invocation
 
 To invoke a method on an object/instance:
 
-  Circle c = new_Circle();
+  Object c = new_Circle();
   printf("area = %f\n", calcArea(c));
 
 The first argument of the method call is the object/instance the
@@ -799,7 +843,7 @@ This is the name of the class of the object/instance.
 To access the classname, use accessor methods like for all
 other attributes, e.g.:
 
-  Circle c = new_Circle();
+  Object c = new_Circle();
   printf("c is of class %s\n", getClassname(c));
   setClassname(c, "Oval");
 
@@ -841,27 +885,6 @@ None by default.
 
 Please send any hints on other modules trying to accomplish the same
 or a similar thing. I haven't found one, yet.
-
-=head1 FUTURE PLANS
-
-=over 2
-
-=item Implement way to add methods of the same name which differ in
-	their signature (maybe including adding alternative constructors).
-
-	Possible solution:
-	
-	Allow the definition of methods with same names and differing
-	signatures, B<as long as all parameters have class types!>.
-	Then, when generating the file, create a wrapper method (which
-	is already created now) in which an if-else-if-else construct
-	decides which implementation to choose based on the actual
-	types of the parameters. Since the wrapper functin can take
-	any amount of parameters, it needs to handle the parameters
-	using va_args, so a macro with the function name should be
-	created which adds a ",NULL" to end of the function call.
-
-=back
 
 =head1 AUTHOR
 
