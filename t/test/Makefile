@@ -5,7 +5,7 @@ SRC  = main.c
 DEBUG = -DDEBUG
 
 CC      = gcc 
-CCPARAM = -ansi -pedantic -Wall -Werror -lm -lz 
+CCPARAM = -relaxed_ansi -Wall -Werror -lm -lz 
 
 OS = $(shell echo -n $(shell uname -a | sed 's/ .*//g'))
 
