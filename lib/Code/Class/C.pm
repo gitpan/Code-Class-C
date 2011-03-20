@@ -4,9 +4,8 @@ use 5.010000;
 use strict;
 use warnings;
 use Parse::RecDescent;
-#use Data::Dump qw(dump);
 
-our $VERSION = '0.03';
+our $VERSION = '0.05';
 
 my $LastClassID = 0;
 
@@ -296,6 +295,12 @@ sub toHtml
 						font-family: sans-serif;
 						font-weight: 200;
 					}
+					a {
+						color: blue;
+					}
+						a:hover {
+							color: #99f;
+						}
 					p i {
 						font-size: 80%;
 					}
@@ -345,13 +350,13 @@ sub toHtml
 					
 					}
 						dt {
-							margin-top: 1em;
+							margin-top: 0.4em;
 						}
 						dd {
-							margin: 0 0 0 2em;
+							margin: 0.6em 0 0 2em;
 						}
 					.typename {
-						color: blue;
+						color: #66c;
 					}
 					.typename:hover {
 						color: #99f;
@@ -359,6 +364,20 @@ sub toHtml
 					.methname {
 						color: green;
 					}
+					p.methnames {
+						border-bottom: dotted 1px #ccc;
+						padding-bottom: 10pt;
+						margin-bottom: 10pt;
+					}
+						p.methnames a {
+							display: inline-block;
+							background: #eee;
+							-moz-border-radius: 0.4em;
+							-webkit-border-radius: 0.4em;
+							border-radius: 0.4em;			
+							padding: 4pt 6pt 3pt;
+							margin-bottom: 2pt;
+						}
 					pre {
 						background: #eee;
 						font-size: 9pt;
@@ -371,6 +390,23 @@ sub toHtml
 						font-weight: 200;
 						font-family: Monaco, fixed;
 					}
+						pre span {
+							font-size: inherit;
+							font-weight: inherit;
+							font-family: inherit;
+						}
+						pre .keyword {
+							color: #099;
+						}
+						pre .string {
+							color: #669;
+						}
+						pre .comment {
+							color: #999;
+						}
+						pre .call {
+							color: #009;
+						}
 				}.'</style>'.				
 				'<script type="text/javascript">'.
 					'function showClass (id) {'.
@@ -409,7 +445,6 @@ sub toHtml
 			push @topclasses, $classname
 				unless scalar @{$self->{'classes'}->{$classname}->{'isa'}};
 		}
-		#print STDERR dump(\@topclasses);
 		
 		my $html = '<ul>';
 		foreach my $classname (@topclasses) {
@@ -433,8 +468,8 @@ sub toHtml
 					if $classname eq $parentclassname;
 			}
 		}
-		return
-			(scalar @children > 1 ?
+		return 
+			(scalar @children ?
 				'<ul>'.
 					join('', map { '<li>'.$self->_mkClassLink($_).' '.$self->_mkSubclassList($_).'</li>' } @children).
 				'</ul>'
@@ -469,22 +504,37 @@ sub toHtml
 		$html .= '</dl>';
 		$html .= '<p><i>none</i></p>' unless scalar keys %{$class->{'attr'}};
 		
-		$html .= '<h2>Methods</h2><dl>';
+		$html .= '<h2>Methods</h2><p class="methnames">';
+		my $meths = '';
 		foreach my $methname (sort keys %{$class->{'subs'}}) {
 			my $sign = $self->{'parser'}->signature($methname);
 			my $code = $class->{'subs'}->{$methname};
-			   $code =~ s/(\r?\n)[\s\t]*/$1/g;
-			$html .= 
+			   $code =~ s/\t/  /g;
+			   $code =~ s/(\r?\n)\s\s/$1/g;
+			$html .= '<a href="#'.$sign->{'name'}.'">'.$sign->{'name'}.'</a> ';
+			$meths .= 
 				'<dt>'.
+					'<a name="'.$sign->{'name'}.'"></a>'.
 					$self->_mkClassLink($sign->{'returns'}).' : '.
 					'<span class="methname">'.$sign->{'name'}.'</span>'.
 					' ( '.join(', ', map { $self->_mkClassLink($_->[1]).' '.$_->[0] } @{$sign->{'params'}}).' )'.
-				'</dt><dd><pre>'.$code.'</pre></dd>';
+				'</dt><dd><pre>'.$self->_highlightC($code).'</pre></dd>';
 		}
-		$html .= '</dl>';
+		$html .= '</p><dl>'.$meths.'</dl>';
 		$html .= '<p><i>none</i></p>' unless scalar keys %{$class->{'subs'}};
 		
 		return $html;
+	}
+	
+	sub _highlightC
+	{
+		my ($self, $c) = @_;
+		$c =~ s/(\"[^\"]*\")/<span class="string">$1<\/span>/g;
+		$c =~ s/(if|else|for|return|self|while|void|static)/<span class="keyword">$1<\/span>/g;
+		$c =~ s/(\/\/[^\n]*)/<span class="comment">$1<\/span>/g;
+		$c =~ s/(\/\*[^\*]*\*\/)/<span class="comment">$1<\/span>/mg;
+		$c =~ s/([a-zA-Z\_][a-zA-Z0-9\_]*)\(/<span class="call">$1<\/span>\(/g;
+		return $c;
 	}
 
 	sub _mkClassLink
@@ -628,10 +678,10 @@ int eq (char* s1, char* s2) {
 		my $class = $self->{'classes'}->{$classname};
 
 		# typedef for class-specific struct pointer (member 'data' in S_Object struct)
-		$typedefs .= 'typedef struct S_'.$classname.'* '.$classname.';'."\n\n";
+		$typedefs .= 'typedef struct S_'.$self->_get_c_typename($classname).'* '.$self->_get_c_typename($classname).';'."\n\n";
 		
 		# struct for the class
-		$structs .= 'struct S_'.$classname.' {'."\n";
+		$structs .= 'struct S_'.$self->_get_c_typename($classname).' {'."\n";
 		$structs .= '  int dummy'.";\n" unless scalar keys %{$class->{'attr'}};
 		foreach my $attrname (sort keys %{$class->{'attr'}}) {
 			$structs .= '  '.$self->_get_c_attrtype($class->{'attr'}->{$attrname}).' '.$attrname.";\n";
@@ -655,11 +705,13 @@ int eq (char* s1, char* s2) {
 	$ccode .= $bottomcode."\n\n";
 
 	##############################################################################
-	$ccode .= "/*-----------------------------------------------------------*/\n";
-	$ccode .= "/* Main function */\n\n";
-	$ccode .= 'int main (int argc, char** argv) {'."\n";
-	$ccode .= '  '.$maincode;
-	$ccode .= "\n}\n";
+	if (length $maincode) {
+		$ccode .= "/*-----------------------------------------------------------*/\n";
+		$ccode .= "/* Main function */\n\n";
+		$ccode .= 'int main (int argc, char** argv) {'."\n";
+		$ccode .= '  '.$maincode;
+		$ccode .= "\n}\n";
+	}
 
 	open OUTFILE, '>'.$file
 		or die "Error: failed to open output file '$file': $!\n";
@@ -670,6 +722,15 @@ int eq (char* s1, char* s2) {
 ################################################################################
 ################################################################################
 ################################################################################
+
+#-------------------------------------------------------------------------------
+sub _dbg
+#-------------------------------------------------------------------------------
+{
+	my (@msg) = @_;
+	eval('use Data::Dump;');
+	Data::Dump::dump(\@msg);
+}
 
 #-------------------------------------------------------------------------------
 sub _get_subclasses
@@ -863,6 +924,12 @@ sub _generate_functions
 					: '').
 			($info->{'returns'} eq 'void' ? '' : '  '.$info->{'returns'}.' result;'."\n");
 
+		# Note:
+		#  - the first pass creates if()-clauses for the exact matches for the parameters
+		#  - the second pass creates if()-clauses for isa-based matches for the parameters
+		#
+		#  => maybe not cool???
+
 		my $first = 1;
 		foreach my $name (keys %{$functions{$fname}}) {
 			my $impl_c_name = '_impl'.$functions{$fname}->{$name}->{'number'}.'_'.$fname;
@@ -888,6 +955,21 @@ sub _generate_functions
 
 			$first = 0;
 		}
+		#---- UGLY ---
+		# second pass for the isa() select's
+		foreach my $name (keys %{$functions{$fname}}) {
+			my $impl_c_name = '_impl'.$functions{$fname}->{$name}->{'number'}.'_'.$fname;
+			my $c_returns = ($info->{'returns'} eq 'void' ? '' : 'result = ');
+			
+			$wrappers .=
+				'  '.($first ? 'if' : 'else if').' ('.
+					$self->_generate_wrapper_select_clause($info,$name,1).') { '."\n".
+				#'    printf("  [check impl '.$name.']\n");'."\n".
+				'    '.$c_returns.$impl_c_name.'('.$self->_generate_params_call($info,$name).');'."\n".
+				'  }'."\n";
+		}
+		#-------------
+
 		my $p = 0;
 		$wrappers .= 
 			'  else {'."\n".
@@ -930,7 +1012,7 @@ sub _generate_functions
 sub _generate_wrapper_select_clause
 #-------------------------------------------------------------------------------
 {
-	my ($self, $info, $implname) = @_;
+	my ($self, $info, $implname, $use_isa) = @_;
 	my $sign = $self->{'parser'}->signature($implname);
 	my @clauses = ();
 	if ($info->{'all-class-types'}) {
@@ -938,8 +1020,10 @@ sub _generate_wrapper_select_clause
 		push @clauses, '(argc == '.scalar(@{$sign->{'params'}}).')';
 		foreach my $param (@{$sign->{'params'}}) {
 			my $class = $self->{'classes'}->{$param->[1]};
-			#push @clauses, '(argv['.$p.']->classid == '.$class->{'id'}.')';
-			push @clauses, 'isa(argv['.$p.']->classid, '.$class->{'id'}.')';
+			push @clauses, 
+				($use_isa ?
+					'isa(argv['.$p.']->classid, '.$class->{'id'}.'/* '.$class->{'name'}.' */)' :
+					'(argv['.$p.']->classid == '.$class->{'id'}.'/* '.$class->{'name'}.' */)');
 			$p++;
 		}
 	}
@@ -951,7 +1035,10 @@ sub _generate_wrapper_select_clause
 				push @clauses, 
 					($p == 0 ? 
 						'self->classid == '.$class->{'id'} : 
-					  'isa(p'.$p.'->classid, '.$class->{'id'}.')');
+						($use_isa ?
+						  'isa(p'.$p.'->classid, '.$class->{'id'}.'/* '.$class->{'name'}.' */)' :
+					  	'(p'.$p.'->classid == '.$class->{'id'}.'/* '.$class->{'name'}.' */)')
+					 );
 			}
 			$p++;
 		}
@@ -990,6 +1077,11 @@ sub _generate_params_declaration
 		foreach my $param (@{$sign->{'params'}}) {
 			my $paramtype = 
 				(exists $self->{'classes'}->{$param->[1]} ? 'Object' : $param->[1]);
+			#if ($param->[1] eq 'Callback') {
+			#	print $param->[1]."\n";
+			#	print "  ".(exists $self->{'classes'}->{$param->[1]})."\n";
+			#	print "  $paramtype\n";
+			#}
 			push @params, $paramtype.' '.$param->[0];
 		}
 		return join(', ', @params);		
@@ -1022,6 +1114,8 @@ sub _init
 	#$::RD_TRACE = 1;
 	$::RD_AUTOSTUB = 1;		
 
+	#$Parse::RecDescent::skip = '[\s\t]*';
+
 	my $Grammar = q(
 
 		<autoaction: { [@item] } >
@@ -1032,7 +1126,7 @@ sub _init
 			pair: name ":" name
 				{ [$item[1], $item[3]] }
 			
-		name: /[a-zA-Z0-9\*\_\s\t\n]*/
+		name: /[a-zA-Z0-9\[\]\*\_\s\t\n]*/
 			{ $item[1] }
 
 	);
@@ -1041,6 +1135,9 @@ sub _init
 	
 	# if attributes/methods etc. have been auto-generated
 	$self->{'autogen'} = 0;
+	
+	# prefix for type names created by this module
+	$self->{'prefix-types'} = 'T_';
 	
 	return $self;
 }
@@ -1094,10 +1191,10 @@ sub _define_constructors
 			'  Object obj = (Object)malloc(sizeof(struct S_Object));'."\n".
 			'  obj->classid = '.$class->{'id'}.';'."\n".
 			'  setstr(obj->classname, "'.$classname.'");'."\n".
-			'  obj->data = malloc(sizeof(struct S_'.$classname.'));'."\n".
+			'  obj->data = malloc(sizeof(struct S_'.$self->_get_c_typename($classname).'));'."\n".
 			join('',
 				map {
-					'  (('.$classname.')(obj->data))->'.$_.' = '.$self->_get_init_c_code($class->{'attr'}->{$_}).';'."\n"
+					'  (('.$self->_get_c_typename($classname).')(obj->data))->'.$_.' = '.$self->_get_init_c_code($class->{'attr'}->{$_}).';'."\n"
 				}
 				sort keys %{$class->{'attr'}}
 			).
@@ -1125,8 +1222,8 @@ sub _define_destructors
 		$self->func(
 			'delete(obj:'.$classname.'):void',
 				
-			'free(('.$classname.')(obj->data));'."\n".
-			'free(obj)'."\n"
+			'free(('.$self->_get_c_typename($classname).')(obj->data));'."\n".
+			'free(obj);'."\n"
 		);
 	}
 }
@@ -1146,17 +1243,37 @@ sub _define_accessors
 			$self->meth(
 				$classname,
 				'get'.ucfirst($attrname).'():'.$attrtype,
-				'return (('.$classname.')(self->data))->'.$attrname,
+				'return (('.$self->_get_c_typename($classname).')(self->data))->'.$attrname.';',
+			);
+
+			# getter to pointer
+			$self->meth(
+				$classname,
+				'get'.ucfirst($attrname).'Ptr():'.
+					(exists $self->{'classes'}->{$attrtype} ? 'Object' : $attrtype).'*',
+				
+				'return &((('.$self->_get_c_typename($classname).')(self->data))->'.$attrname.');',
 			);
 
 			# setter
 			$self->meth(
 				$classname,
 				'set'.ucfirst($attrname).'(value:'.$attrtype.'):void',
-				'(('.$classname.')(self->data))->'.$attrname.' = value;',
+				'(('.$self->_get_c_typename($classname).')(self->data))->'.$attrname.' = value;',
 			);
+			
+			# setter for pointer
+			# needed?
 		}
 	}
+}
+
+#-------------------------------------------------------------------------------
+sub _get_c_typename
+#-------------------------------------------------------------------------------
+{
+	my ($self, $type) = @_;
+	return (exists $self->{'classes'}->{$type} ? $self->{'prefix-types'}.$type : $type);
 }
 
 #-------------------------------------------------------------------------------
@@ -1193,7 +1310,6 @@ sub _load_code_from_file
 	$code =~ s/^[\s\t\n\r]*//g;
 	$code =~ s/[\s\t\n\r]*$//g;
 	$code =~ s/(\r?\n\r?)([^\s])/$1  $2/g;
-	$code .= ';' if $code !~ /\;$/;
 	return $code;
 }
 
@@ -1500,10 +1616,13 @@ Suppose you defined a class named 'Circle' with an attribute
 the following:
 
   float r;
+  float* r_ptr;
   Object c = new_Circle();
   r = getRadius(c);
+  r_ptr = getRadiusPtr(c);
   
   setRadius(c, 42.0);
+  // no setter using pointers is autogenerated (yet)
 
 As you can see, all methods (either getter or setter or other ones)
 need to get the object/instance as first parameter.
