@@ -3,9 +3,8 @@ package Code::Class::C;
 use 5.010000;
 use strict;
 use warnings;
-use Parse::RecDescent;
 
-our $VERSION = '0.05';
+our $VERSION = '0.06';
 
 my $LastClassID = 0;
 
@@ -24,7 +23,7 @@ sub func
 {
 	my ($self, $name, $code) = @_;
 
-	my $sign = $self->{'parser'}->signature($name);
+	my $sign = $self->_parse_signature($name);
 	
 	die "Error: function name '$sign->{'name'}' is not a valid function name\n"
 		if $sign->{'name'} !~ /^[a-z][a-zA-Z0-9\_]*$/;
@@ -68,7 +67,7 @@ sub meth
 		unless exists $self->{'classes'}->{$classname};
 	
 	my $class = $self->{'classes'}->{$classname};
-	my $sign = $self->{'parser'}->signature($name);
+	my $sign = $self->_parse_signature($name);
 
 	die "Error: methodname '$sign->{'name'}' is not a valid method name\n"
 		if $sign->{'name'} !~ /^[a-z][a-zA-Z0-9\_]*$/;
@@ -169,6 +168,7 @@ sub readFile
 
 			my ($attr, $type) =
 				$_ =~ /^\@attr[\s\t]+([^\s\t\:]+)[\s\t]*\:?[\s\t]*(.*)$/;
+			$type =~ s/[\s\t\n\r]*$//g;
 
 			warn "Warning: attribute definition $classname/$attr overwrites present one.\n"
 				if exists $self->{'classes'}->{$classname}->{'attr'}->{$attr};
@@ -507,7 +507,7 @@ sub toHtml
 		$html .= '<h2>Methods</h2><p class="methnames">';
 		my $meths = '';
 		foreach my $methname (sort keys %{$class->{'subs'}}) {
-			my $sign = $self->{'parser'}->signature($methname);
+			my $sign = $self->_parse_signature($methname);
 			my $code = $class->{'subs'}->{$methname};
 			   $code =~ s/\t/  /g;
 			   $code =~ s/(\r?\n)\s\s/$1/g;
@@ -724,6 +724,26 @@ int eq (char* s1, char* s2) {
 ################################################################################
 
 #-------------------------------------------------------------------------------
+sub _parse_signature
+#-------------------------------------------------------------------------------
+{
+	my ($self, $signature_string) = @_;
+	
+	# render(self:Square,self:Vertex,self:Point):void
+	my $rs = '[\s\t\n\r]*';
+	my $rn = '[^\(\)\,\:]+';
+	my ($name, $args, $returns) = ($signature_string =~ /^$rs($rn)$rs\($rs(.*)$rs\)$rs\:$rs($rn)$rs$/);
+	my @params = map { [split /$rs\:$rs/] } split /$rs\,$rs/, $args;
+
+	my $sign = {
+		name    => $name,
+		returns => $returns,
+		params  => \@params,
+	};
+	return $sign;
+}
+
+#-------------------------------------------------------------------------------
 sub _dbg
 #-------------------------------------------------------------------------------
 {
@@ -775,7 +795,7 @@ sub _generate_functions
 	foreach my $classname (keys %{$self->{'classes'}}) {
 		my $class = $self->{'classes'}->{$classname};
 		foreach my $name (keys %{$class->{'subs'}}) {
-			my $sign = $self->{'parser'}->signature($name);
+			my $sign = $self->_parse_signature($name);
 			$functions{$sign->{'name'}} = {}
 				unless exists $functions{$sign->{'name'}};
 			
@@ -790,7 +810,7 @@ sub _generate_functions
 	}
 	# add normal functions, too
 	foreach my $fname (keys %{$self->{'functions'}}) {
-		my $sign = $self->{'parser'}->signature($fname);
+		my $sign = $self->_parse_signature($fname);
 		$functions{$sign->{'name'}}->{$fname} = 
 			{
 				'classname' => undef,
@@ -817,7 +837,7 @@ sub _generate_functions
 		#print "($fname)\n";
 
 		# define scheme of signature
-		my $first_sign = $self->{'parser'}->signature((keys %{$functions{$fname}})[0]);
+		my $first_sign = $self->_parse_signature((keys %{$functions{$fname}})[0]);
 		my $returns = 
 			(exists $self->{'classes'}->{$first_sign->{'returns'}} ? 
 				'Object' : $first_sign->{'returns'});
@@ -840,7 +860,7 @@ sub _generate_functions
 			# check if all signatures match the scheme
 			foreach my $name (keys %{$functions{$fname}}) {
 				#print "  [$name]\n";
-				my $sign = $self->{'parser'}->signature($name);
+				my $sign = $self->_parse_signature($name);
 				   $sign->{'returns'} = 
 						(exists $self->{'classes'}->{$sign->{'returns'}} ? 
 							'Object' : $sign->{'returns'});
@@ -1013,7 +1033,7 @@ sub _generate_wrapper_select_clause
 #-------------------------------------------------------------------------------
 {
 	my ($self, $info, $implname, $use_isa) = @_;
-	my $sign = $self->{'parser'}->signature($implname);
+	my $sign = $self->_parse_signature($implname);
 	my @clauses = ();
 	if ($info->{'all-class-types'}) {
 		my $p = 0;
@@ -1051,7 +1071,7 @@ sub _generate_params_call
 #-------------------------------------------------------------------------------
 {
 	my ($self, $info, $implname) = @_;
-	my $sign = $self->{'parser'}->signature($implname);
+	my $sign = $self->_parse_signature($implname);
 	my @params = ();
 	my $p = 0;
 	foreach my $param (@{$sign->{'params'}}) {
@@ -1072,7 +1092,7 @@ sub _generate_params_declaration
 	my ($self, $info, $implname) = @_;
 
 	if (defined $implname) {
-		my $sign = $self->{'parser'}->signature($implname);
+		my $sign = $self->_parse_signature($implname);
 		my @params = ();
 		foreach my $param (@{$sign->{'params'}}) {
 			my $paramtype = 
@@ -1108,37 +1128,12 @@ sub _init
 	$self->{'classes'} = {};
 	$self->{'functions'} = {};
 
-	$::RD_ERRORS = 1;
-	#$::RD_WARN = 1;
-	#$::RD_HINT = 1;		
-	#$::RD_TRACE = 1;
-	$::RD_AUTOSTUB = 1;		
-
-	#$Parse::RecDescent::skip = '[\s\t]*';
-
-	my $Grammar = q(
-
-		<autoaction: { [@item] } >
-
-		signature: name "(" pair(s? /,/) ")" ":" name
-			{ {'name' => $item[1], 'params' => $item[3], 'returns' => $item[6] } }
-
-			pair: name ":" name
-				{ [$item[1], $item[3]] }
-			
-		name: /[a-zA-Z0-9\[\]\*\_\s\t\n]*/
-			{ $item[1] }
-
-	);
-
-	$self->{'parser'} = Parse::RecDescent->new($Grammar);
-	
 	# if attributes/methods etc. have been auto-generated
 	$self->{'autogen'} = 0;
 	
 	# prefix for type names created by this module
 	$self->{'prefix-types'} = 'T_';
-	
+		
 	return $self;
 }
 
@@ -1162,7 +1157,7 @@ sub _inherit_members
 	
 					my $orig_membername = $membername;
 					if ($membertype eq 'subs') {
-						my $sign = $self->{'parser'}->signature($membername);
+						my $sign = $self->_parse_signature($membername);
 						$sign->{'params'}->[0]->[1] = $classname;
 						$membername = $self->_signature_to_string($sign);
 					}
@@ -1263,7 +1258,14 @@ sub _define_accessors
 			);
 			
 			# setter for pointer
-			# needed?
+			$self->meth(
+				$classname,
+				'set'.ucfirst($attrname).'Ptr(value:'.
+					(exists $self->{'classes'}->{$attrtype} ? 'Object' : $attrtype).'*):void',
+					
+				'if (value == NULL) { printf("In set'.ucfirst($attrname).'Ptr(): cannot handle NULL pointer\n"); exit(1); }'.
+				'(('.$self->_get_c_typename($classname).')(self->data))->'.$attrname.' = *value;',
+			);			
 		}
 	}
 }
@@ -1319,10 +1321,13 @@ sub _get_parent_classes
 {
 	my ($self, $classname) = @_;
 	my @parents = ();
+	my @parents_parents = ();
 	my $class = $self->{'classes'}->{$classname};
 	foreach my $name (@{$class->{'isa'}}) {
-		push @parents, $self->_get_parent_classes($name), $name;
+		push @parents, $name;
+		push @parents_parents, $self->_get_parent_classes($name);
 	}
+	push @parents, @parents_parents;
 	# delete dublicates
 	my @clean = ();
 	map {
@@ -1330,7 +1335,6 @@ sub _get_parent_classes
 		push(@clean, $x) unless scalar(grep { $x eq $_ } @clean);
 	} 
 	@parents;
-	
 	return @clean;
 }
 
@@ -1617,12 +1621,13 @@ the following:
 
   float r;
   float* r_ptr;
+  int x = 42.0;
   Object c = new_Circle();
   r = getRadius(c);
   r_ptr = getRadiusPtr(c);
   
-  setRadius(c, 42.0);
-  // no setter using pointers is autogenerated (yet)
+  setRadius(c, x);
+  setRadiusPtr(c, &x);
 
 As you can see, all methods (either getter or setter or other ones)
 need to get the object/instance as first parameter.
