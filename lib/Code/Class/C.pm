@@ -4,7 +4,7 @@ use 5.010000;
 use strict;
 use warnings;
 
-our $VERSION = '0.06';
+our $VERSION = '0.07';
 
 my $LastClassID = 0;
 
@@ -69,6 +69,9 @@ sub meth
 	my $class = $self->{'classes'}->{$classname};
 	my $sign = $self->_parse_signature($name);
 
+	die "Error: failed to parse method with signature '$name'.\n"
+		if !defined $sign->{'returns'};
+
 	die "Error: methodname '$sign->{'name'}' is not a valid method name\n"
 		if $sign->{'name'} !~ /^[a-z][a-zA-Z0-9\_]*$/;
 
@@ -103,6 +106,42 @@ sub parent
 }
 
 #-------------------------------------------------------------------------------
+sub before
+#-------------------------------------------------------------------------------
+{
+	my ($self, $classname, $methname, $code) = @_;
+	die "Error: no class '$classname' defined\n"
+		unless exists $self->{'classes'}->{$classname};
+	
+	my $class = $self->{'classes'}->{$classname};
+
+	die "Error: methodname '$methname' is not a valid method name\n"
+		if $methname !~ /^[a-z][a-zA-Z0-9\_]*$/;
+
+	$class->{'before'}->{$methname} = $self->_load_code_from_file($code);
+	
+	return $self;
+}
+
+#-------------------------------------------------------------------------------
+sub after
+#-------------------------------------------------------------------------------
+{
+	my ($self, $classname, $methname, $code) = @_;
+	die "Error: no class '$classname' defined\n"
+		unless exists $self->{'classes'}->{$classname};
+	
+	my $class = $self->{'classes'}->{$classname};
+
+	die "Error: methodname '$methname' is not a valid method name\n"
+		if $methname !~ /^[a-z][a-zA-Z0-9\_]*$/;
+
+	$class->{'after'}->{$methname} = $self->_load_code_from_file($code);
+	
+	return $self;
+}
+
+#-------------------------------------------------------------------------------
 sub class
 #-------------------------------------------------------------------------------
 {
@@ -124,6 +163,9 @@ sub class
 			'isa'  => [],
 			'attr' => {},
 			'subs' => {},
+			'top'    => ($opts{'top'} || ''),
+			'bottom' => ($opts{'bottom'} || ''),
+			'after'  => {},
 		};
 
 	# define attributes
@@ -147,8 +189,14 @@ sub readFile
 	my ($self, $filename) = @_;
 	open SRCFILE, $filename or die "Error: cannot open source file '$filename': $!\n";
 	#print "reading '$filename'\n";
-	my $classname = undef;
-	my $subname   = undef;
+	my $classname = undef; # if set, name of current class
+	my $subname   = undef; # if set, name of current method
+	my $funcname  = undef; # if set, name of current function
+	my $top				= undef; # if set, means currently parsing a @top block
+	my $bottom		= undef; # if set, means currently parsing a @bottom block
+	my $after			= undef; # if set, the method name for current @after block
+	my $before		= undef; # if set, the method name for current @before block
+	
 	my $buffer    = undef;
 	my $l = 0;
 	while (<SRCFILE>) {
@@ -175,30 +223,92 @@ sub readFile
 				
 			$self->attr($classname, $attr, $type);
 		}
-		elsif (/^\@sub/) {
+		elsif (/^\@(sub|func|before|after)/) {
 			die "Error: no classname present at line $l.\n"
 				unless defined $classname;
 			
-			#print "($filename:$_)\n";
-			if (defined $subname && defined $buffer) {
-				# add method to class
-				$self->meth($classname, $subname, $buffer);
-			}
+			# save previous "something"
+			_save_current_buffer($self, $classname, $subname, $funcname, $before, $after, $buffer);
 
-			($subname) = $_ =~ /^\@sub[\s\t]+(.+)[\s\t\n\r]*$/;
+			# start new "something"
+			if (/^\@sub/) {
+				($subname) = $_ =~ /^\@sub[\s\t]+(.+)[\s\t\n\r]*$/;
+				$funcname = undef;
+				$before = undef;
+				$after = undef;
+			}
+			elsif (/^\@func/) {
+				($funcname) = $_ =~ /^\@func[\s\t]+(.+)[\s\t\n\r]*$/;
+				$subname = undef;
+				$before = undef;
+				$after = undef;
+			}
+			elsif (/^\@after/) {
+				my ($methname) = $_ =~ /^\@after[\s\t]+(.+)[\s\t\n\r]*$/;
+				$after = $methname;
+				$funcname = undef;
+				$before = undef;
+				$subname = undef;
+			}
+			elsif (/^\@before/) {
+				my ($methname) = $_ =~ /^\@before[\s\t]+(.+)[\s\t\n\r]*$/;
+				$before = $methname;
+				$funcname = undef;
+				$after = undef;
+				$subname = undef;
+			}
+			
 			$buffer = '';
+			$bottom = undef;
+			$top = undef;
 		}
-		elsif (defined $classname && defined $subname && defined $buffer) {
+		elsif (/^\@top/) {
+			$top = '';
+			$bottom = undef;
+		}
+		elsif (/^\@bottom/) {
+			$bottom = '';	
+			$top = undef;
+		}
+		
+		# store current line in a buffer
+		elsif (!defined $subname && defined $top) {
+			$self->{'area'}->{'top'} .= $_;
+		}
+		elsif (!defined $subname && defined $bottom) {
+			$self->{'area'}->{'bottom'} .= $_;
+		}
+		else {
 			$buffer .= $_;
 		}
 		$l++;
 	}
-	if (defined $subname && defined $buffer) {
-		# add method to class
-		$self->meth($classname, $subname, $buffer);
-	}	
+	# save last "something"
+	_save_current_buffer($self, $classname, $subname, $funcname, $before, $after, $buffer);
+	
 	close SRCFILE;
 	return 1;
+	
+	sub _save_current_buffer
+	{
+		my ($self, $classname, $subname, $funcname, $before, $after, $buffer) = @_;
+		if (defined $subname && defined $buffer) {
+			# add method to class
+			$self->meth($classname, $subname, $buffer);
+		}
+		elsif (defined $funcname && defined $buffer) {
+			# add function
+			$self->func($funcname, $buffer);
+		}
+		elsif (defined $before && defined $buffer) {
+			# add 'before'-hook
+			$self->before($classname, $before, $buffer);
+		}
+		elsif (defined $after && defined $buffer) {
+			# add 'after'-hook
+			$self->after($classname, $after, $buffer);
+		}
+	}
 }
 
 #-------------------------------------------------------------------------------
@@ -556,67 +666,35 @@ sub generate
 	my ($self, %opts) = @_;
 	
 	my $file     = $opts{'file'}    || die "Error: generate() needs a filename.\n";
-	my $headers  = $opts{'headers'} || [];
+	my $lheaders = $opts{'localheaders'}  || [];
+	push @{$lheaders}, @{$opts{'headers'} || []};
+	my $gheaders = $opts{'globalheaders'} || [];
 	my $maincode = $self->_load_code_from_file($opts{'main'} || '');
-	my $topcode    = $self->_load_code_from_file($opts{'top'} || '');
-	my $bottomcode = $self->_load_code_from_file($opts{'bottom'} || '');
+	
+	my $topcode = 
+		$self->_load_code_from_file($opts{'top'} || '')."\n\n".
+		$self->_load_code_from_file($self->{'area'}->{'top'});
+	
+	my $bottomcode = 
+		$self->_load_code_from_file($opts{'bottom'} || '')."\n\n".
+		$self->_load_code_from_file($self->{'area'}->{'bottom'});
 
 	$self->_autogen();
 	
 	# add standard headers needed
 	foreach my $h (qw(string stdio stdlib stdarg)) {
-		unshift @{$headers}, $h
-			unless scalar grep { $_ eq $h } @{$headers};
+		unshift @{$gheaders}, $h
+			unless scalar grep { $_ eq $h } @{$gheaders};
 	}
 
 	##############################################################################	
 	my $ccode = '';
 	
 	# write headers
-	foreach my $hname (@{$headers}) {
-		$ccode .= '#include ';
-		if ($hname =~ /^(std|string)/) {
-			$ccode .= '<'.$hname.'.h>';
-		} else {
-			$ccode .= '"'.$hname.'.h"';
-		}
-		$ccode .= "\n";
-	}
-
+	$ccode .= join '', map { '#include "'.$_.'.h"'."\n" } @{$lheaders};
+	$ccode .= join '', map { '#include <'.$_.'.h>'."\n" } @{$gheaders};
+	
 	$ccode .= q{
-/*----------------------------------------------------------------------------*/
-
-#define READ_ARGV \
-  Object* argv = (Object*)NULL; \
-  int argc = 0; \
-  { \
-    va_list ap; \
-    Object current; \
-    if (p != (Object)NULL) { \
-      va_start(ap, p); \
-      current = p; \
-      while (current != (Object)NULL) { \
-        argc++; \
-        argv = (Object*)realloc(argv, sizeof(Object) * argc); \
-        argv[argc-1] = current; \
-        current = va_arg(ap, Object); \
-      } \
-      va_end(ap); \
-    } \
-  } \
-
-#define DUMP_ARGV \
-  { \
-    int a; \
-    printf("  The method was called with %d parameters:\n", argc); \
-    for (a = 0; a < argc; a++) { \
-      printf("  [%d] is a %s\n", a, argv[a]->classname); \
-    } \
-  } \
-
-#define CLEANUP_ARGV \
-  free(argv);
-
 /*----------------------------------------------------------------------------*/
 
 typedef struct S_Object* Object;
@@ -626,6 +704,11 @@ struct S_Object {
   char classname[256];
   void* data;
 };
+
+typedef Object my;
+
+typedef void(*FPtr1)(Object);
+typedef void(*FPtr2)(Object, Object);
 
 /*----------------------------------------------------------------------------*/
 /* String functions */
@@ -684,7 +767,8 @@ int eq (char* s1, char* s2) {
 		$structs .= 'struct S_'.$self->_get_c_typename($classname).' {'."\n";
 		$structs .= '  int dummy'.";\n" unless scalar keys %{$class->{'attr'}};
 		foreach my $attrname (sort keys %{$class->{'attr'}}) {
-			$structs .= '  '.$self->_get_c_attrtype($class->{'attr'}->{$attrname}).' '.$attrname.";\n";
+			my $attrtype = $class->{'attr'}->{$attrname};
+			$structs .= '  '.$self->_get_c_attrtype($attrtype).' CCC_'.$attrname.";\n";
 		}
 		$structs .= "};\n\n";
 	}
@@ -777,9 +861,12 @@ sub _autogen
 	my ($self) = @_;
 	unless ($self->{'autogen'}) {
 		$self->_inherit_members();
+
+		$self->_define_accessors();
+		$self->_add_hook_code();
 		$self->_define_constructors();
 		$self->_define_destructors();
-		$self->_define_accessors();
+		$self->_define_dumpers();
 		$self->{'autogen'} = 1;
 	}
 }
@@ -838,21 +925,26 @@ sub _generate_functions
 
 		# define scheme of signature
 		my $first_sign = $self->_parse_signature((keys %{$functions{$fname}})[0]);
+
 		my $returns = 
 			(exists $self->{'classes'}->{$first_sign->{'returns'}} ? 
 				'Object' : $first_sign->{'returns'});
+
+		my $all_class_types =
+			(scalar(grep { exists $self->{'classes'}->{$_} } @{$first_sign->{'params'}})
+				== scalar(@{$first_sign->{'params'}}) ? 1 : 0);
+
 		my $params = [ # sequence of "Object" or "<c-type>" strings
 			map { exists $self->{'classes'}->{$_->[1]} ? 'Object' : $_->[1] }
 				@{$first_sign->{'params'}}
 		];
-		my $all_class_types =
-			(scalar(grep { $_ eq 'Object' } @{$params}) == scalar(@{$params}) ? 1 : 0);
 
 		$infos{$fname} = {
 			'all-class-types' => $all_class_types,
 			'params-scheme' => $params,
 			'returns' => $returns,
 			'at-least-one-impl-has-zero-params' => 0,
+			'has-only-one-implementation' => (scalar(keys %{$functions{$fname}}) == 1),
 		};
 
 		if (scalar keys %{$functions{$fname}} > 2) {
@@ -900,128 +992,56 @@ sub _generate_functions
 	}
 	
 	# generate c code
-	my $macros   = ''; # macros
-	my $protos   = ''; # prototypes for implementation functions
-	my $wrappers = ''; # wrapper functions
-	my $impls    = ''; # implementation functions
+	my $protos = ''; # prototypes for implementation functions
+	my $impls  = ''; # implementation functions
 	
 	foreach my $fname (sort keys %functions) {
 		my $info = $infos{$fname};
-	
-		my $with_macro = 
-			($info->{'all-class-types'} || $info->{'at-least-one-impl-has-zero-params'});
-		
-		if ($with_macro) {
-			# function with only class-typed parameters
-		
-			# generate a wrapper macro that adds a NULL-pointer to the end of
-			# the parameter list (to be able to determine the end of parameter list
-			# when analysing them in C)
-			$macros .=
-				'#define   '.$fname.'(...) __'.$fname.'((Object)NULL,##__VA_ARGS__,(Object)NULL)'."\n".
-				'#define __'.$fname.'(null,...) _'.$fname.'(__VA_ARGS__)'."\n\n";
-		}
 
-		# generate a wrapper function that analyses the actual parameters
-		# and chooses an appropriate implementation and finally calls that impl.
+		my $first_impl_name = (keys %{$functions{$fname}})[0];
+		my $first_sign = $self->_parse_signature($first_impl_name);
+
+		$protos .= 
+			$info->{'returns'}.' '.$fname.' ('.
+				$self->_generate_params_declaration($first_impl_name).');'."\n";
+
+		$impls .=
+			$info->{'returns'}.' '.$fname.' ('.
+				$self->_generate_params_declaration($first_impl_name).') {'."\n";
 		
-		$wrappers .= 
-			$info->{'returns'}.' '.
-				($with_macro ? '_' : '').$fname.' ('.
-				$self->_generate_params_declaration($info).') {'."\n".
-			($with_macro ? 
-				'  READ_ARGV'."\n".
-				''
-				#'  printf("[wrapper '.$fname.'(), argc=%d, argv=", argc);'."\n".
-				#'  if (argc > 0) {'."\n".
-				#'    int i;'."\n".
-				#'    for (i = 0; i < argc; i++) {'."\n".
-				#'      printf("[%d:%s/%d]", i, argv[i]->classname, argv[i]->classid);'."\n".
-				#'    }'."\n".
-				#'  }'."\n".
-				#'  printf("]\n");'."\n"
-				
-					: '').
-			($info->{'returns'} eq 'void' ? '' : '  '.$info->{'returns'}.' result;'."\n");
-
-		# Note:
-		#  - the first pass creates if()-clauses for the exact matches for the parameters
-		#  - the second pass creates if()-clauses for isa-based matches for the parameters
-		#
-		#  => maybe not cool???
-
 		my $first = 1;
-		foreach my $name (keys %{$functions{$fname}}) {
-			my $impl_c_name = '_impl'.$functions{$fname}->{$name}->{'number'}.'_'.$fname;
-			my $c_returns = ($info->{'returns'} eq 'void' ? '' : 'result = ');
-			
-			$protos .= 
-				$info->{'returns'}.' '.$impl_c_name.' ('.
-					$self->_generate_params_declaration($info,$name).');'."\n";
-
-			$wrappers .=
-				'  '.($first ? 'if' : 'else if').' ('.
-					$self->_generate_wrapper_select_clause($info,$name).') { '."\n".
-				#'    printf("  [check impl '.$name.']\n");'."\n".
-				'    '.$c_returns.$impl_c_name.'('.$self->_generate_params_call($info,$name).');'."\n".
-				'  }'."\n";
-
-			#my $class = $self->{'classes'}->{$functions{$fname}->{$name}->{'classname'}};
+		for my $name (keys %{$functions{$fname}}) {
 			$impls .=
-				$info->{'returns'}.' '.$impl_c_name.' ('.
-					$self->_generate_params_declaration($info,$name).') {'."\n".
-				'  '.$functions{$fname}->{$name}->{'code'}."\n".
-				'}'."\n\n";
-
+				'  '.($first ? '' : 'else ').'if '.
+					'('.$self->_generate_wrapper_select_clause($name).') {'."\n".
+				'    '.$functions{$fname}->{$name}->{'code'}."\n".
+				'  }'."\n";
 			$first = 0;
 		}
-		#---- UGLY ---
-		# second pass for the isa() select's
-		foreach my $name (keys %{$functions{$fname}}) {
-			my $impl_c_name = '_impl'.$functions{$fname}->{$name}->{'number'}.'_'.$fname;
-			my $c_returns = ($info->{'returns'} eq 'void' ? '' : 'result = ');
-			
-			$wrappers .=
-				'  '.($first ? 'if' : 'else if').' ('.
-					$self->_generate_wrapper_select_clause($info,$name,1).') { '."\n".
-				#'    printf("  [check impl '.$name.']\n");'."\n".
-				'    '.$c_returns.$impl_c_name.'('.$self->_generate_params_call($info,$name).');'."\n".
-				'  }'."\n";
-		}
-		#-------------
-
+		
+		$impls .= '  else {'."\n";
+		$impls .= '    printf("Error: Failed to find an implementation of function/method \''.$fname.'\'.\n");'."\n";
+		$impls .= '    printf("The parameters passed were:\n");'."\n";
 		my $p = 0;
-		$wrappers .= 
-			'  else {'."\n".
-			#'    int i = 0;'."\n".
-			'    printf("Error: could not find a method implementation for '.
-				'\''.$fname.'\' matching the actual parameters\n");'."\n".
-			($with_macro ?
-				'    DUMP_ARGV'."\n" : '').
-			'    exit(1);'."\n".
-			($info->{'returns'} eq 'Object' ? '    return (Object)NULL;'."\n" : 
-				($info->{'returns'} ne 'void' ? '    return ('.$info->{'returns'}.')0;'."\n" : 
-					'')).
-			'  }'."\n".
-			($with_macro ? 
-				'  CLEANUP_ARGV'."\n" : '').
-			($info->{'returns'} ne 'void' ? 
-				'  return result;'."\n" : '').
-			"}\n\n";
+		for my $param (@{$first_sign->{'params'}}) {
+			my $paramname = $param->[0];
+			my $paramtype = $param->[1];
+			if (exists $self->{'classes'}->{$paramtype}) {
+				$impls .= '    printf(" ['.$p.'] = %s\n", '.$paramname.'->classname);'."\n";
+			} else {
+				$impls .= '    printf(" ['.$p.'] = '.$paramtype.'\n");'."\n";			
+			}
+			$p++;
+		}
+		$impls .= '    exit(0);'."\n";
+		$impls .= '  }'."\n";
+		$impls .= '}'."\n\n";
 	}
 	
 	return
 		"/*-----------------------------------------------------------*/\n".
-		"/* Macros for all functions */\n\n".
-		$macros."\n".
-		
-		"/*-----------------------------------------------------------*/\n".
 		"/* Prototypes for implementation functions */\n\n".
 		$protos."\n".
-
-		"/*-----------------------------------------------------------*/\n".
-		"/* Wrapper functions */\n\n".
-		$wrappers."\n".
 
 		"/*-----------------------------------------------------------*/\n".
 		"/* Implementation functions */\n\n".
@@ -1032,91 +1052,38 @@ sub _generate_functions
 sub _generate_wrapper_select_clause
 #-------------------------------------------------------------------------------
 {
-	my ($self, $info, $implname, $use_isa) = @_;
+	my ($self, $implname, $use_isa) = @_;
 	my $sign = $self->_parse_signature($implname);
 	my @clauses = ();
-	if ($info->{'all-class-types'}) {
-		my $p = 0;
-		push @clauses, '(argc == '.scalar(@{$sign->{'params'}}).')';
-		foreach my $param (@{$sign->{'params'}}) {
+	my $p = 0;
+	foreach my $param (@{$sign->{'params'}}) {
+		my $paramname = $param->[0];
+		my $paramtype = $param->[1];
+		if (exists $self->{'classes'}->{$paramtype}) {
 			my $class = $self->{'classes'}->{$param->[1]};
 			push @clauses, 
-				($use_isa ?
-					'isa(argv['.$p.']->classid, '.$class->{'id'}.'/* '.$class->{'name'}.' */)' :
-					'(argv['.$p.']->classid == '.$class->{'id'}.'/* '.$class->{'name'}.' */)');
-			$p++;
+				($p > 0 ?
+					'isa('.$paramname.'->classid, '.$class->{'id'}.'/* '.$paramtype.' */)' :
+					$paramname.'->classid == '.$class->{'id'}.'/* '.$paramtype.' */');
 		}
-	}
-	else {
-		my $p = 0;
-		foreach my $param (@{$sign->{'params'}}) {
-			if (exists $self->{'classes'}->{$param->[1]}) {
-				my $class = $self->{'classes'}->{$param->[1]};
-				push @clauses, 
-					($p == 0 ? 
-						'self->classid == '.$class->{'id'} : 
-						($use_isa ?
-						  'isa(p'.$p.'->classid, '.$class->{'id'}.'/* '.$class->{'name'}.' */)' :
-					  	'(p'.$p.'->classid == '.$class->{'id'}.'/* '.$class->{'name'}.' */)')
-					 );
-			}
-			$p++;
-		}
+		$p++;
 	}
 	return (scalar @clauses ? join(' && ',@clauses) : '1');	
 }
 
 #-------------------------------------------------------------------------------
-sub _generate_params_call
-#-------------------------------------------------------------------------------
-{
-	my ($self, $info, $implname) = @_;
-	my $sign = $self->_parse_signature($implname);
-	my @params = ();
-	my $p = 0;
-	foreach my $param (@{$sign->{'params'}}) {
-		push @params, 
-			($info->{'all-class-types'} ? 
-				'argv['.$p.']' : 
-				($p == 0 ? 'self' : 'p'.$p));
-		$p++;
-	}
-	return join(', ', @params);
-}
-
-
-#-------------------------------------------------------------------------------
 sub _generate_params_declaration
 #-------------------------------------------------------------------------------
 {
-	my ($self, $info, $implname) = @_;
-
-	if (defined $implname) {
-		my $sign = $self->_parse_signature($implname);
-		my @params = ();
-		foreach my $param (@{$sign->{'params'}}) {
-			my $paramtype = 
-				(exists $self->{'classes'}->{$param->[1]} ? 'Object' : $param->[1]);
-			#if ($param->[1] eq 'Callback') {
-			#	print $param->[1]."\n";
-			#	print "  ".(exists $self->{'classes'}->{$param->[1]})."\n";
-			#	print "  $paramtype\n";
-			#}
-			push @params, $paramtype.' '.$param->[0];
-		}
-		return join(', ', @params);		
+	my ($self, $implname) = @_;
+	my $sign = $self->_parse_signature($implname);
+	my @params = ();
+	foreach my $param (@{$sign->{'params'}}) {
+		my $paramtype = 
+			(exists $self->{'classes'}->{$param->[1]} ? 'Object' : $param->[1]);
+		push @params, $paramtype.' '.$param->[0];
 	}
-	else {
-		return 'Object p, ...' if $info->{'all-class-types'};
-		
-		my @params = ();
-		my $p = 0;
-		foreach my $param (@{$info->{'params-scheme'}}) {
-			push @params, $param.' '.($p == 0 ? 'self' : 'p'.$p);
-			$p++;
-		}
-		return join(', ', @params);	
-	}
+	return (scalar @params ? join(', ', @params) : 'void');		
 }
 
 #-------------------------------------------------------------------------------
@@ -1133,6 +1100,12 @@ sub _init
 	
 	# prefix for type names created by this module
 	$self->{'prefix-types'} = 'T_';
+	
+	# code areas that can be filled as classes are parsed/read
+	$self->{'area'} = {
+		'top' => '',
+		'bottom' => '',
+	};
 		
 	return $self;
 }
@@ -1148,7 +1121,7 @@ sub _inherit_members
 		my $class = $self->{'classes'}->{$classname};
 		foreach my $parentclassname ($self->_get_parent_classes($classname)) {
 			my $parentclass = $self->{'classes'}->{$parentclassname};
-			foreach my $membertype (qw(attr subs)) {
+			foreach my $membertype (qw(attr subs after before)) {
 				foreach my $membername (keys %{$parentclass->{$membertype}}) {
 					if ($membertype eq 'attr' && exists $class->{$membertype}->{$membername}) {
 						die "Error: inherited attribute '$membername' in class $classname must be of the same type as in class '$parentclassname'\n"
@@ -1173,6 +1146,53 @@ sub _inherit_members
 }
 
 #-------------------------------------------------------------------------------
+sub _add_hook_code
+#-------------------------------------------------------------------------------
+{
+	my ($self) = @_;
+	foreach my $hooktype (qw(before after)) {
+		foreach my $classname (keys %{$self->{'classes'}}) {
+			my $class = $self->{'classes'}->{$classname};
+			foreach my $methname (keys %{$class->{$hooktype}}) {
+				next if $methname eq 'new';
+				
+				my $methods = $self->_get_methods_by_name($class, $methname);
+				die "Error: $hooktype-hook for $classname.$methname cannot be installed, ".
+						"because no method with that name exists in $classname.\n"
+					unless scalar keys %{$methods};
+				
+				# add hook code
+				foreach my $meth (keys %{$methods}) {
+					if ($hooktype eq 'before') {
+						$class->{'subs'}->{$meth} = 
+							"{\n".$class->{$hooktype}->{$methname}."\n}\n".$class->{'subs'}->{$meth};
+					}
+					elsif ($hooktype eq 'after') {
+						$class->{'subs'}->{$meth} = 
+							$class->{'subs'}->{$meth}."{\n".$class->{$hooktype}->{$methname}."\n}\n";
+					}
+				}
+			}
+		}
+	}
+}
+
+# finds all methods in a class with the same name
+#-------------------------------------------------------------------------------
+sub _get_methods_by_name
+#-------------------------------------------------------------------------------
+{
+	my ($self, $class, $methname) = @_;
+	my %subs = ();
+	foreach my $s (keys %{$class->{'subs'}}) {
+		my $sign = $self->_parse_signature($s);
+		$subs{$s} = $class->{'subs'}->{$s}
+			if $sign->{'name'} eq $methname;
+	}
+	return \%subs;
+}
+
+#-------------------------------------------------------------------------------
 sub _define_constructors
 #-------------------------------------------------------------------------------
 {
@@ -1182,18 +1202,121 @@ sub _define_constructors
 		
 		$self->func(
 			'new_'.ucfirst($classname).'():Object',
-				
-			'  Object obj = (Object)malloc(sizeof(struct S_Object));'."\n".
-			'  obj->classid = '.$class->{'id'}.';'."\n".
-			'  setstr(obj->classname, "'.$classname.'");'."\n".
-			'  obj->data = malloc(sizeof(struct S_'.$self->_get_c_typename($classname).'));'."\n".
+
+			'Object self = NULL;'."\n".
+			
+			# pre hook
+			(exists $class->{'before'}->{'new'} ?
+				"{\n".$class->{'before'}->{'new'}."\n}\n" : '').
+			
+			"{\n".
+			'  self = (Object)malloc(sizeof(struct S_Object));'."\n".
+			'  if (self == (Object)NULL) {'."\n".
+			'    printf("Failed to allocate memory for instance of class \''.$classname.'\'\n");'."\n".
+			'    exit(1);'."\n".
+			'  }'."\n".
+			'  self->classid = '.$class->{'id'}.';'."\n".
+			'  setstr(self->classname, "'.$classname.'");'."\n".
+			'  self->data = malloc(sizeof(struct S_'.$self->_get_c_typename($classname).'));'."\n".
+			'  if (self->data == NULL) {'."\n".
+			'    printf("Failed to allocate memory for instance-data of class \''.$classname.'\'\n");'."\n".
+			'    exit(1);'."\n".
+			'  }'."\n".
 			join('',
 				map {
-					'  (('.$self->_get_c_typename($classname).')(obj->data))->'.$_.' = '.$self->_get_init_c_code($class->{'attr'}->{$_}).';'."\n"
+					my $attrtype = $class->{'attr'}->{$_};
+					($attrtype eq 'pthread_mutex_t' ?
+						'' :
+						'  (('.$self->_get_c_typename($classname).')(self->data))->CCC_'.$_.
+							' = '.$self->_get_init_c_code($attrtype).';'."\n");
 				}
 				sort keys %{$class->{'attr'}}
 			).
-			'  return obj;'."\n"
+			"}\n".
+
+			# post hook
+			(exists $class->{'after'}->{'new'} ?
+				"{\n".$class->{'after'}->{'new'}."\n}\n" : '').
+			'  return self;'."\n"
+		);
+	}
+}
+
+#-------------------------------------------------------------------------------
+sub _define_dumpers
+#-------------------------------------------------------------------------------
+{
+	my ($self) = @_;
+	foreach my $classname (keys %{$self->{'classes'}}) {
+		my $class = $self->{'classes'}->{$classname};
+		
+		$self->func(
+			'dump(self:'.$classname.',level:int,maxLevel:int):void',
+
+			# pre hook
+			(exists $class->{'before'}->{'dump'} ?
+				"{\n".$class->{'before'}->{'dump'}."\n}\n" : '').
+
+			"{\n".
+			'  int i;'."\n".
+			'  char indent[256];'."\n".
+			'  indent[0] = \'\\0\';'."\n".
+			'  for (i = 0; i < level; i += 1) {'."\n".
+			'    strcat(indent, "    ");'."\n".
+			'  }'."\n".
+			
+			'if (level <= maxLevel && maxLevel <= 64) {'."\n".			
+			
+			'  if (self == NULL) {'."\n".
+			'  	 printf("%s(NULL)\n", indent);'."\n".
+			'  }'."\n".
+			'  else {'."\n".
+			
+				'  printf("%s{'.$classname.' #'.$class->{'id'}.'\n", indent);'."\n".
+				join('',
+					map {
+						my $s = '  printf("%s  .'.$_.' <'.$class->{'attr'}->{$_}.'> = ", indent);'."\n";			
+						if (exists $self->{'classes'}->{$class->{'attr'}->{$_}}) {
+							$s .= 
+								'  printf("\n");'.
+								'  if (get'.ucfirst($_).'(self) == NULL)'."\n".
+								'  	 printf("%s    (NULL)\n", indent);'."\n".
+								'  else '."\n".
+								'    dump(get'.ucfirst($_).'(self),level+1,maxLevel);'."\n";			
+						}
+						elsif ($class->{'attr'}->{$_} eq 'float') {
+							$s .= '  printf("%f\n", get'.ucfirst($_).'(self));'."\n";									
+						}
+						elsif ($class->{'attr'}->{$_} eq 'int') {
+							$s .= '  printf("%d\n", get'.ucfirst($_).'(self));'."\n";									
+						}
+						elsif ($class->{'attr'}->{$_} eq 'char') {
+							$s .= '  printf("%d / \'%c\'\n", get'.ucfirst($_).'(self), get'.ucfirst($_).'(self));'."\n";									
+						}
+						elsif ($class->{'attr'}->{$_} eq 'char*') {
+							$s .= '  printf("\'%s\'\n", get'.ucfirst($_).'(self));'."\n";									
+						}
+						else {
+							$s .= '  printf("?\n");'."\n";									
+						}
+						$s;
+					}
+					sort keys %{$class->{'attr'}}
+				).
+				'  printf("%s}\n", indent);'."\n".
+				
+			'  }'."\n".
+			"}\n".
+			
+			'else {'."\n".
+			'  printf("%s...\n", indent);'."\n".
+			"}\n".
+
+			"}\n".
+
+			# post hook
+			(exists $class->{'after'}->{'dump'} ?
+				"{\n".$class->{'after'}->{'dump'}."\n}\n" : '')			
 		);
 	}
 }
@@ -1203,7 +1326,12 @@ sub _get_init_c_code
 #-------------------------------------------------------------------------------
 {
 	my ($self, $attrtype) = @_;
-	return (exists $self->{'classes'}->{$attrtype} ? '(Object)NULL' : '('.$attrtype.')0');
+	return 
+		(exists $self->{'classes'}->{$attrtype} ? 
+			'(Object)NULL' :
+			($attrtype eq 'pthread_mutex_t' ?
+				'(pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER' :
+				'('.$attrtype.')0'));
 }
 
 #-------------------------------------------------------------------------------
@@ -1215,10 +1343,18 @@ sub _define_destructors
 		my $class = $self->{'classes'}->{$classname};
 		
 		$self->func(
-			'delete(obj:'.$classname.'):void',
+			'delete(self:'.$classname.'):void',
 				
-			'free(('.$self->_get_c_typename($classname).')(obj->data));'."\n".
-			'free(obj);'."\n"
+			# pre hook
+			(exists $class->{'before'}->{'delete'} ?
+				"{\n".$class->{'before'}->{'delete'}."\n}\n" : '').
+
+			'free(('.$self->_get_c_typename($classname).')(self->data));'."\n".
+			'free(self);'."\n".
+
+			# post hook
+			(exists $class->{'after'}->{'delete'} ?
+				"{\n".$class->{'after'}->{'delete'}."\n}\n" : '')
 		);
 	}
 }
@@ -1238,7 +1374,7 @@ sub _define_accessors
 			$self->meth(
 				$classname,
 				'get'.ucfirst($attrname).'():'.$attrtype,
-				'return (('.$self->_get_c_typename($classname).')(self->data))->'.$attrname.';',
+				'return (('.$self->_get_c_typename($classname).')(self->data))->CCC_'.$attrname.';',
 			);
 
 			# getter to pointer
@@ -1247,14 +1383,14 @@ sub _define_accessors
 				'get'.ucfirst($attrname).'Ptr():'.
 					(exists $self->{'classes'}->{$attrtype} ? 'Object' : $attrtype).'*',
 				
-				'return &((('.$self->_get_c_typename($classname).')(self->data))->'.$attrname.');',
+				'return &((('.$self->_get_c_typename($classname).')(self->data))->CCC_'.$attrname.');',
 			);
 
 			# setter
 			$self->meth(
 				$classname,
 				'set'.ucfirst($attrname).'(value:'.$attrtype.'):void',
-				'(('.$self->_get_c_typename($classname).')(self->data))->'.$attrname.' = value;',
+				'(('.$self->_get_c_typename($classname).')(self->data))->CCC_'.$attrname.' = value;',
 			);
 			
 			# setter for pointer
@@ -1263,8 +1399,8 @@ sub _define_accessors
 				'set'.ucfirst($attrname).'Ptr(value:'.
 					(exists $self->{'classes'}->{$attrtype} ? 'Object' : $attrtype).'*):void',
 					
-				'if (value == NULL) { printf("In set'.ucfirst($attrname).'Ptr(): cannot handle NULL pointer\n"); exit(1); }'.
-				'(('.$self->_get_c_typename($classname).')(self->data))->'.$attrname.' = *value;',
+				'if (value == NULL) { printf("In set'.ucfirst($attrname).'Ptr(): cannot handle NULL pointer\n"); exit(1); }'."\n".
+				'(('.$self->_get_c_typename($classname).')(self->data))->CCC_'.$attrname.' = *value;',
 			);			
 		}
 	}
@@ -1301,17 +1437,20 @@ sub _signature_to_string
 sub _load_code_from_file
 #-------------------------------------------------------------------------------
 {
-	my ($self, $code) = @_;
+	my ($self, $code) = @_;	
 	$code = '' unless defined $code;
 	if (($code =~ /^\.?\.?\/[^\*]/) || ($code !~ /\n/ && -f $code && -r $code)) {
 		open SRCFILE, $code or die "Error: cannot open source file '$code': $!\n";
-		#print "reading '$code'\n";
 		$code = join '', <SRCFILE>;
 		close SRCFILE;
 	}
 	$code =~ s/^[\s\t\n\r]*//g;
 	$code =~ s/[\s\t\n\r]*$//g;
 	$code =~ s/(\r?\n\r?)([^\s])/$1  $2/g;
+	
+	# experimental: replace "//..." comments with "/*...*/"
+	$code =~ s/\/\/+(.*)$/\/*$1*\//mg;
+	
 	return $code;
 }
 
@@ -1407,6 +1546,12 @@ The class() method lets you define a new class:
         return 3.1415 * getRadius(self) * getRadius(self);
       },
     },
+    after => {
+    	'new' => q{...},
+    	# ...
+    },
+    top => q{...},
+    bottom => q{...},
   );
 
 The class() method takes as first argument the name of the class.
@@ -1451,6 +1596,30 @@ The hash value is the C sourcecode of the method (s.b. for details).
 The hash value can optionally be a filename. In this case, the file's
 content is used as the method's body.
 
+=head4 top => I<C code or filename>
+=head4 bottom => I<C code or filename>
+
+This defines arbitrary C code that is included in the top/bottom
+area of the generated C source.
+
+=head4 after => <hashref>
+=head4 before => <hashref>
+
+This option defines post and pre hooks for specific methods.
+For example:
+
+  after => {
+    'new' => q{...},
+    'myMethod' => q{...},
+  }
+
+This defines two post hooks, one for the constructor and
+the second for a method named 'myMethod'. Ths hook code is
+inserted into the methods it is defined for inside an own
+C code block (C<{ ... }>) so hook-local C variables can
+be defined as if it would be a function. Also all the parameters
+of the function can be accessed like in the actual method code.
+
 =head3 attr( I<classname>, I<attribute-name>, I<attribute-type> )
 
 Defines an attribute in a class with the given name and type.
@@ -1470,6 +1639,43 @@ Defines the parent class(es) of a given class.
 
   $gen->parent('Shape','BaseClass1','BaseClass2');
 
+=head3 after( I<classname>, I<method-signature>, I<c-code> )
+
+Defines a post hook for a method. The hook code is inserted into
+the method it is defined on, at the end of the method.
+
+See below for special hook names.
+
+=head3 before( I<classname>, I<method-signature>, I<c-code> )
+
+Defines a pre hook for a method. The hook code is inserted into
+the method it is defined on, at the beginning of the method.
+
+The special hook names are:
+
+=over 1
+
+=item * new: The hook is attached to the constructor function.
+
+=item * delete: The hook is attached to the destructor function.
+
+=back
+
+To illustrate this, here is an example of a hook that is
+installed after the constructor:
+
+  $gen->after('new', q{printf("This is called when the object was constructed.\n");});
+
+  $gen->before('new', q{printf("This is called when the object is about to be constructed.\n");});
+
+A few things about constructor and destructor hooks should be noted:
+The before-new hook is called before the object (C variable "self") is
+created, so no manipulation of self can be done. The after-new hook
+however can access the self variable.
+
+Also, the post-delete hook can access the self variable, but should be aware
+that it has already been free'd.
+
 =head3 readFile( I<filename> )
 
 readFile() takes one argument, a filename, loads this file and extracts
@@ -1481,6 +1687,16 @@ Here is an example file:
 
   //------------------------------------------------------------------------------
   @class Triangle: Shape, Rectangle
+
+  //------------------------------------------------------------------------------
+  @top
+  
+  	// this code is appended to the top-area of the generated C source
+  
+  //------------------------------------------------------------------------------
+  @bottom
+  
+  	// this code is appended to the top-area of the generated C source
   
   //------------------------------------------------------------------------------
   @attr prop:int
@@ -1498,6 +1714,16 @@ Here is an example file:
   @sub calcOutline():float
   
   return getWidth(self) * 2 + getHeight(self) * 2;
+
+  //------------------------------------------------------------------------------
+  @after new
+  
+  	// this code is called in the constructor at the end
+  	
+  //------------------------------------------------------------------------------
+  @before calcArea
+
+		// this code is called in the method 'calcArea' at the beginning
 
 A line starting with '//' is ignored.
 A line that starts with an '@' is treated as a class or
@@ -1519,7 +1745,8 @@ It takes as parameters the signature of the function and the code
 
   $gen->generate(
     file    => './main.c',
-    headers => ['stdio','opengl'],
+    globalheaders => ['stdio','stdlib'],
+    localheaders => ['opengl'],
     main    => 'c/main.c',
     top     => 'c/top.c',
     bottom  => 'c/bottom.c',
@@ -1597,6 +1824,11 @@ instance of that class like so (C code):
 
 Important: B<All class instances in C are of the type "Object">!
 
+There exists a type alias for the "Object" type named "my", so
+C code can be written a little more "Perl-like", e.g.:
+
+  my c = new_Circle();
+
 =head3 Instance destruction
 
 Since there is a way to create instances, there is also a way to
@@ -1607,6 +1839,16 @@ destruct any object/instance:
 
   Object c = new_Circle();
   delete(c); // c now points to NULL
+
+=head3 Instance print to STDOUT
+
+The automatically generated C function dump() will print the
+content of any class instance to STDOUT:
+
+  dump(myObject, 0, 2);
+
+The first parameter is the object, the second the current level
+(always 0) and the second the maximum level to print.
 
 =head3 Inheritance
 
