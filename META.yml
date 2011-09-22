@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               Code-Class-C
-version:            0.07
+version:            0.08
 abstract:           Perl extension for creating ANSI C code from a set
 author:
     - Tom Kirchner <tk@apple.com>

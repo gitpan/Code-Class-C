@@ -4,7 +4,7 @@ use 5.010000;
 use strict;
 use warnings;
 
-our $VERSION = '0.07';
+our $VERSION = '0.08';
 
 my $LastClassID = 0;
 
@@ -36,7 +36,9 @@ sub func
 		if exists $self->{'functions'}->{$name};
 
 	$self->{'functions'}->{$name} = $self->_load_code_from_file($code);
-	
+	$self->{'functions-doc'}->{$name} = ''
+		unless exists $self->{'functions-doc'}->{$name};
+
 	return $self;
 }
 
@@ -54,6 +56,8 @@ sub attr
 		if $attrname !~ /^[a-z][a-zA-Z0-9\_]*$/;
 	
 	$class->{'attr'}->{$attrname} = $attrtype;
+	$class->{'attr-doc'}->{$attrname} = ''
+		unless exists $class->{'attr-doc'}->{$attrname};
 	
 	return $self;
 }
@@ -83,8 +87,10 @@ sub meth
 		if exists $class->{'subs'}->{$name};
 
 	$class->{'subs'}->{$name} = $self->_load_code_from_file($code);
+	$class->{'subs-doc'}->{$name} = ''
+		unless exists $class->{'subs-doc'}->{$name};
 	
-	return $self;
+	return $name;
 }
 
 #-------------------------------------------------------------------------------
@@ -160,9 +166,12 @@ sub class
 		{
 			'id'   => $LastClassID,
 			'name' => $name,
+			'doc'  => '',
 			'isa'  => [],
 			'attr' => {},
+			'attr-doc' => {},
 			'subs' => {},
+			'subs-doc' => {},
 			'top'    => ($opts{'top'} || ''),
 			'bottom' => ($opts{'bottom'} || ''),
 			'after'  => {},
@@ -194,11 +203,13 @@ sub readFile
 	my $funcname  = undef; # if set, name of current function
 	my $top				= undef; # if set, means currently parsing a @top block
 	my $bottom		= undef; # if set, means currently parsing a @bottom block
+	my $types			= undef; # if set, means currently parsing a @types block
 	my $after			= undef; # if set, the method name for current @after block
 	my $before		= undef; # if set, the method name for current @before block
 	
-	my $buffer    = undef;
-	my $l = 0;
+	my $buffer = undef;
+	my $l      = 0;
+	my $docref = undef; # ref to docstring of previous entry
 	while (<SRCFILE>) {
 		next if /^\/[\/\*]/;
 		if (/^\@class/) {
@@ -209,6 +220,7 @@ sub readFile
 			$self->class($class) unless exists $self->{'classes'}->{$class};
 			$self->parent($class, @parents);
 			$classname = $class;
+			$docref = \$self->{'classes'}->{$class}->{'doc'};
 		}
 		elsif (/^\@attr/) {
 			die "Error: no classname present at line $l.\n"
@@ -222,10 +234,16 @@ sub readFile
 				if exists $self->{'classes'}->{$classname}->{'attr'}->{$attr};
 				
 			$self->attr($classname, $attr, $type);
+			
+			$self->{'classes'}->{$classname}->{'attr-doc'}->{$attr} = ''
+				unless exists $self->{'classes'}->{$classname}->{'attr-doc'}->{$attr};
+			$docref = \$self->{'classes'}->{$classname}->{'attr-doc'}->{$attr};
 		}
 		elsif (/^\@(sub|func|before|after)/) {
-			die "Error: no classname present at line $l.\n"
-				unless defined $classname;
+			unless (/^\@func/) { 	
+				die "Error: no classname present at line $l.\n"
+					unless defined $classname;
+			}
 			
 			# save previous "something"
 			_save_current_buffer($self, $classname, $subname, $funcname, $before, $after, $buffer);
@@ -236,12 +254,23 @@ sub readFile
 				$funcname = undef;
 				$before = undef;
 				$after = undef;
+
+				my $methname = $self->_get_complete_method_name($classname, $subname);
+				#print "($methname)\n" if $methname =~ /^getAppWindow/;
+				$self->{'classes'}->{$classname}->{'subs-doc'}->{$methname} = ''
+					unless exists $self->{'classes'}->{$classname}->{'subs-doc'}->{$methname};
+				#print ">>docref meth $methname\n";
+				$docref = \$self->{'classes'}->{$classname}->{'subs-doc'}->{$methname};
 			}
 			elsif (/^\@func/) {
 				($funcname) = $_ =~ /^\@func[\s\t]+(.+)[\s\t\n\r]*$/;
 				$subname = undef;
 				$before = undef;
 				$after = undef;
+
+				$self->{'functions-doc'}->{$funcname} = ''
+					unless exists $self->{'functions-doc'}->{$funcname};
+				$docref = \$self->{'functions-doc'}->{$funcname};
 			}
 			elsif (/^\@after/) {
 				my ($methname) = $_ =~ /^\@after[\s\t]+(.+)[\s\t\n\r]*$/;
@@ -261,14 +290,28 @@ sub readFile
 			$buffer = '';
 			$bottom = undef;
 			$top = undef;
+			$types = undef;
 		}
 		elsif (/^\@top/) {
 			$top = '';
 			$bottom = undef;
+			$types = undef;
 		}
 		elsif (/^\@bottom/) {
 			$bottom = '';	
 			$top = undef;
+			$types = undef;
+		}
+		elsif (/^\@types/) {
+			$types = '';
+			$bottom = undef;	
+			$top = undef;
+		}
+		elsif (/^[\s\t]*\@/) {
+			my ($doc) = $_ =~ /^[\s\t]*\@[\s\t]*(.*)$/;
+			#print "[$doc]\n";
+			${$docref} .= ' '.$doc
+				if defined $docref;
 		}
 		
 		# store current line in a buffer
@@ -277,6 +320,9 @@ sub readFile
 		}
 		elsif (!defined $subname && defined $bottom) {
 			$self->{'area'}->{'bottom'} .= $_;
+		}
+		elsif (!defined $subname && defined $types) {
+			$self->{'area'}->{'types'} .= $_;
 		}
 		else {
 			$buffer .= $_;
@@ -292,22 +338,260 @@ sub readFile
 	sub _save_current_buffer
 	{
 		my ($self, $classname, $subname, $funcname, $before, $after, $buffer) = @_;
-		if (defined $subname && defined $buffer) {
+		if (defined $classname && defined $subname && defined $buffer) {
 			# add method to class
-			$self->meth($classname, $subname, $buffer);
+			my $methname = $self->meth($classname, $subname, $buffer);
 		}
 		elsif (defined $funcname && defined $buffer) {
 			# add function
-			$self->func($funcname, $buffer);
+			$self->func($funcname, $buffer);			
 		}
-		elsif (defined $before && defined $buffer) {
+		elsif (defined $classname && defined $before && defined $buffer) {
 			# add 'before'-hook
 			$self->before($classname, $before, $buffer);
 		}
-		elsif (defined $after && defined $buffer) {
+		elsif (defined $classname && defined $after && defined $buffer) {
 			# add 'after'-hook
 			$self->after($classname, $after, $buffer);
 		}
+	}
+	
+	sub _get_complete_method_name
+	{
+		my ($self, $classname, $methname) = @_;
+		my $sign = $self->_parse_signature($methname);
+		unshift @{$sign->{'params'}}, ['self', $classname];
+		return $self->_signature_to_string($sign);
+	}
+}
+
+sub _skip_class
+{
+	my ($classname, $classnames) = @_;
+	return
+		defined $classnames &&
+		!scalar grep { $_ eq $classname } @{$classnames};
+}
+
+#-------------------------------------------------------------------------------
+sub functionsToLaTeX
+#-------------------------------------------------------------------------------
+{
+	my ($self, $autogen) = @_;
+	$autogen = 0 unless defined $autogen;
+	
+	die "Error: cannot call toLaTeX() method AFTER generate() method has been called\n"
+		if $autogen == 0 && $self->{'autogen'} == 1;
+	#$self->_autogen();
+
+	my $tex = "\n\n";
+
+	if (scalar keys %{$self->{'functions'}}) {
+		$tex .= '\subsection{Statische Funktionen}'."\n";
+		$tex .= '\begin{description*}'."\n\n";
+		foreach my $funcname (sort keys %{$self->{'functions'}}) {
+			my $sign = $self->_parse_signature($funcname);
+			my $code = $self->{'functions'}->{$funcname};
+				 $code =~ s/\t/  /g;
+				 $code =~ s/(\r?\n)\s\s/$1/g;
+
+			$tex .=
+				'\item \texttt{\color{orange}'.$sign->{'name'}.'(} '.
+				join(",\n", map {
+					'\texttt{'.$_->[0].'} '.$self->_mkClassRef($_->[1]);					
+				} @{$sign->{'params'}}).'\texttt{\color{orange})}'.
+				': '.$self->_mkClassRef($sign->{'returns'})."\n";
+			
+			if (scalar @{$sign->{'params'}} > 0) {
+				$tex .= "\n\n";
+			}
+			$tex .= _docToLaTeX($self->{'functions-doc'}->{$funcname})."\n\n";
+
+# 			$tex .=
+# 				'\item \texttt{\color{red}'.$sign->{'name'}.' ('.
+# 				join(', ', map { $_->[0] } @{$sign->{'params'}}).'):} '.
+# 				$self->_mkClassRef($sign->{'returns'})."\n\n";
+# 			
+# 			if (scalar @{$sign->{'params'}} > 0) {
+# 				$tex .= '\begin{description*}'."\n\n";
+# 				foreach my $param (@{$sign->{'params'}}) {
+# 					$tex .= '\item \texttt{'.$param->[0].'} :\hspace{1ex} '.$self->_mkClassRef($param->[1])."\n\n";
+# 				}
+# 				$tex .= '\end{description*}'."\n\n";
+# 			}
+# 			$tex .= _docToLaTeX($self->{'functions-doc'}->{$funcname})."\n\n";
+# 			$tex .= '\vspace{3mm}'."\n\n";
+		}
+		$tex .= '\end{description*}'."\n\n";
+	}
+
+	return $tex;
+}
+
+#-------------------------------------------------------------------------------
+sub toLaTeX
+#-------------------------------------------------------------------------------
+{
+	my ($self, $autogen, $classnames) = @_;
+	$autogen = 0 unless defined $autogen;
+	
+	die "Error: cannot call toLaTeX() method AFTER generate() method has been called\n"
+		if $autogen == 0 && $self->{'autogen'} == 1;
+	#$self->_autogen();
+	
+	my $tex = "\n\n";
+	foreach my $classname (keys %{$self->{'classes'}}) {
+		next if _skip_class($classname,$classnames);
+		$tex .= $self->_classToLaTeX($classname)."\n\n";
+	}
+
+	return $tex;
+	
+	sub _classToLaTeX
+	{
+		my ($self, $classname) = @_;
+		my $class = $self->{'classes'}->{$classname};
+		my $tex = '\subsection{'.$classname."}\n";
+		$tex .= '\label{Class'.$classname."}\n";
+		
+		$tex .= _docToLaTeX($self->{'classes'}->{$classname}->{'doc'})."\n";
+		$tex .= 'Die Implementierung dieser Klasse ist in der Datei \texttt{'.
+			$classname.'.c} zu finden.'."\n\n";
+
+		$tex .= '\begin{figure}[H]'."\n";
+		$tex .= '	\centering'."\n";
+		$tex .= '	\fbox{\makebox[0.5\textwidth]{'."\n";
+		$tex .= '		\includegraphics[width=0.5\textwidth,keepaspectratio]{diagrams/'.$classname.'.png}'."\n";
+		$tex .= '	}}'."\n";
+		$tex .= '	\caption{UML Klassendiagramm der Klasse '.$classname.'.}'."\n";
+		$tex .= '	\label{Block}'."\n";
+		$tex .= '\end{figure}'."\n";
+		
+		if (scalar @{$class->{'isa'}}) {
+			$tex .= '\subsubsection{Elternklassen}'."\n";
+			
+			#$tex .= '\begin{itemize*}'."\n\n";
+			#foreach my $classname (@{$class->{'isa'}}) {
+			#	#$tex .= '\item '.$self->_mkClassRef($classname)."\n\n";
+			#}
+			#$tex .= '\end{itemize*}'."\n\n";
+
+			$tex .= join ', ', map { $self->_mkClassRef($_) } @{$class->{'isa'}};
+			$tex .= "\n\n";
+		}
+
+		my $subclasses = $self->_get_subclasses()->{$classname};
+		#use Data::Dumper;
+		#print Dumper($subclasses);
+		if (scalar keys %{$subclasses}) {
+			$tex .= '\subsubsection{Kindklassen}'."\n";
+			#$tex .= '\begin{itemize*}'."\n\n";
+			#foreach my $classname (keys %{$subclasses}) {
+			#	$tex .= '\item '.$self->_mkClassRef($classname)."\n\n";
+			#}
+			#$tex .= '\end{itemize*}'."\n\n";
+
+			$tex .= join ', ', map { $self->_mkClassRef($_) } keys %{$subclasses};
+			$tex .= "\n\n";
+		}
+		
+		if (scalar keys %{$class->{'attr'}}) {
+			$tex .= '\subsubsection{Attribute}'."\n";
+			$tex .= '\begin{description*}'."\n\n";
+			foreach my $attrname (sort keys %{$class->{'attr'}}) {
+				$tex .= '\item \texttt{\color{blue}'.$attrname.'} '.$self->_mkClassRef($class->{'attr'}->{$attrname})."\n";
+				$tex .= _docToLaTeX($class->{'attr-doc'}->{$attrname})."\n";
+				#$tex .= '\vspace{3mm}'."\n\n";
+			}
+			$tex .= '\end{description*}'."\n\n";
+		}
+		
+		if (scalar keys %{$class->{'subs'}}) {
+			$tex .= '\subsubsection{Methoden}'."\n";
+			#$tex .= '\setlength{\parskip}{-6pt}'."\n";
+			$tex .= '\begin{description*}'."\n\n";
+			foreach my $methname (sort keys %{$class->{'subs'}}) {
+				my $sign = $self->_parse_signature($methname);
+				my $code = $class->{'subs'}->{$methname};
+					 $code =~ s/\t/  /g;
+					 $code =~ s/(\r?\n)\s\s/$1/g;
+				$tex .=
+					'\item \texttt{\color{orange}'.$sign->{'name'}.'(} '.
+					join(",\n", map {
+						'\texttt{'.$_->[0].'} '.$self->_mkClassRef($_->[1]);					
+					} @{$sign->{'params'}}).'\texttt{\color{orange})}'.
+					#join(', ', map { $_->[0] } @{$sign->{'params'}}).'):} '.
+					': '.$self->_mkClassRef($sign->{'returns'})."\n";
+				
+				if (scalar @{$sign->{'params'}} > 0) {
+					#$tex .= '\renewcommand{\arraystretch}{1.0}'."\n\n";
+					#$tex .= '\begin{tabular}{lcl}'."\n\n";
+					#$tex .= join(",\n", map {
+					#	'\texttt{'.$_->[0].'} : '.$self->_mkClassRef($_->[1]);					
+					#} @{$sign->{'params'}});
+					#foreach my $param (@{$sign->{'params'}}) {
+					#	$tex .= '\texttt{'.$param->[0].'} : '.$self->_mkClassRef($param->[1])."\n";
+					#	# $code
+					#}
+					#$tex .= '\end{tabular}'."\n\n";
+					#$tex .= '\renewcommand{\arraystretch}{1.2}'."\n\n";
+					$tex .= "\n\n";
+				}
+# 				if ($methname =~ /^getAppWindow/) {
+# 					use Data::Dumper;
+# 					print Dumper($class->{'subs-doc'});
+# 				}
+				$tex .= _docToLaTeX($class->{'subs-doc'}->{$methname})."\n\n";
+# 				$tex .= '\begin{Verbatim}[fontsize=\footnotesize]'."\n";
+# 				$tex .= $code."\n";
+# 				$tex .= '\end{Verbatim}'."\n";
+				#$tex .= '\vspace{3mm}'."\n\n";
+			}
+			$tex .= '\end{description*}'."\n\n";
+			#$tex .= '\setlength{\parskip}{6pt}'."\n";
+		}
+		
+		return $tex;
+	}
+	
+	sub _docToLaTeX
+	{
+		my ($doc) = @_;
+		my %replacements = (
+			'{ae}' => '\"a',
+			'{oe}' => '\"o',
+			'{ue}' => '\"u',
+			'{Ae}' => '\"A',
+			'{Oe}' => '\"O',
+			'{Ue}' => '\"U',
+			'{AE}' => '\"A',
+			'{OE}' => '\"O',
+			'{UE}' => '\"U',
+			'{ss}' => '\ss{}',
+		);
+		map { 
+			my $match = quotemeta $_;
+			my $replace = $replacements{$_};
+			$doc =~ s/$match/$replace/g;
+			$_;
+		}
+		keys %replacements;
+		
+		# special replacements
+		$doc =~ s/t\{([^\}]*)\}/\\texttt{$1}/g; # t{...} -> fixed width text
+		$doc =~ s/i\{([^\}]*)\}/\\textit{$1}/g; # i{...} -> italic text
+		$doc =~ s/b\{([^\}]*)\}/\\textbf{$1}/g; # b{...} -> bold text
+		
+		return $doc;
+	}
+	
+	sub _mkClassRef
+	{
+		my ($self, $classname) = @_;
+		return
+			(exists $self->{'classes'}->{$classname} ?
+				'\textit{'.$classname.'}$_{\ref{Class'.$classname.'}}$' :
+				'\textit{\color{gray}'.$classname.'}');
 	}
 }
 
@@ -315,9 +599,12 @@ sub readFile
 sub toDot
 #-------------------------------------------------------------------------------
 {
-	my ($self) = @_;
+	my ($self, $autogen, $classnames) = @_;
+	$autogen = 0 unless defined $autogen;
+	
 	die "Error: cannot call toDot() method AFTER generate() method has been called\n"
-		if $self->{'autogen'};
+		if $autogen == 0 && $self->{'autogen'} == 1;
+	#$self->_autogen();
 	
 	my $dot = 
 		'digraph {'."\n".
@@ -342,6 +629,7 @@ q{
 
 	# add class nodes
 	foreach my $classname (keys %{$self->{'classes'}}) {
+		next if _skip_class($classname,$classnames);
 		my $class = $self->{'classes'}->{$classname};
 		$dot .= 
 			'  '.$classname.' ['."\n".
@@ -355,8 +643,10 @@ q{
 	# add class relationships
 	$dot .= 'edge [ arrowhead="empty" color="black" ]'."\n\n";
 	foreach my $classname (keys %{$self->{'classes'}}) {
+		next if _skip_class($classname,$classnames);
 		my $class = $self->{'classes'}->{$classname};
 		foreach my $parentclassname (@{$class->{'isa'}}) {
+			next if _skip_class($parentclassname,$classnames);
 			$dot .= '  '.$classname.' -> '.$parentclassname."\n";
 		}
 	}
@@ -364,11 +654,13 @@ q{
 	# add "contains" relationships
 	$dot .= 'edge [ arrowhead="vee" color="gray" ]'."\n\n";
 	foreach my $classname (keys %{$self->{'classes'}}) {
+		next if _skip_class($classname,$classnames);
 		my $class = $self->{'classes'}->{$classname};
 		foreach my $attrname (keys %{$class->{'attr'}}) {
 			my $attrtype = $class->{'attr'}->{$attrname};
 			$dot .= '  '.$classname.' -> '.$attrtype."\n"
-				if exists $self->{'classes'}->{$attrtype};
+				if exists $self->{'classes'}->{$attrtype} &&
+					!_skip_class($attrtype,$classnames);
 		}
 	}
 	
@@ -670,6 +962,7 @@ sub generate
 	push @{$lheaders}, @{$opts{'headers'} || []};
 	my $gheaders = $opts{'globalheaders'} || [];
 	my $maincode = $self->_load_code_from_file($opts{'main'} || '');
+	my $debug    = $opts{'debug'} || 0;
 	
 	my $topcode = 
 		$self->_load_code_from_file($opts{'top'} || '')."\n\n".
@@ -678,6 +971,10 @@ sub generate
 	my $bottomcode = 
 		$self->_load_code_from_file($opts{'bottom'} || '')."\n\n".
 		$self->_load_code_from_file($self->{'area'}->{'bottom'});
+
+	my $typescode =
+		$self->_load_code_from_file($opts{'types'} || '')."\n\n".
+		$self->_load_code_from_file($self->{'area'}->{'types'});
 
 	$self->_autogen();
 	
@@ -691,10 +988,47 @@ sub generate
 	my $ccode = '';
 	
 	# write headers
-	$ccode .= join '', map { '#include "'.$_.'.h"'."\n" } @{$lheaders};
 	$ccode .= join '', map { '#include <'.$_.'.h>'."\n" } @{$gheaders};
-	
+	$ccode .= join '', map { '#include "'.$_.'.h"'."\n" } @{$lheaders};
+
+	$ccode .= '#define CREATE_STACK_TRACE ('.($debug ? 1 : 0).')'."\n";
 	$ccode .= q{
+/*----------------------------------------------------------------------------*/
+
+#if CREATE_STACK_TRACE
+
+	#define STACKTRACE_MAX_LENGTH (10)
+	char StackTrace[STACKTRACE_MAX_LENGTH][255];
+	int StackTraceLength = 0;
+	
+	void printStackTrace (void)
+	{
+		int i;
+		printf("Stack trace (last one last):\n");
+		for (i = 0; i < StackTraceLength; i++) {
+			printf("  %d. %s()\n", i, StackTrace[i]);
+		}
+	}
+	
+	void logStackTraceEntry (char* msg)
+	{
+		if (StackTraceLength < STACKTRACE_MAX_LENGTH) {
+			sprintf(StackTrace[StackTraceLength], "%s", msg);
+			StackTraceLength++;
+		}
+		else {
+			/* move all entries one down */
+			int i;
+			for (i = 1; i < StackTraceLength; i++) {
+				sprintf(StackTrace[i-1], "%s", StackTrace[i]);
+			}
+			/* set last one */
+			sprintf(StackTrace[StackTraceLength-1], "%s", msg);
+		}
+	}
+
+#endif
+
 /*----------------------------------------------------------------------------*/
 
 typedef struct S_Object* Object;
@@ -707,9 +1041,6 @@ struct S_Object {
 
 typedef Object my;
 
-typedef void(*FPtr1)(Object);
-typedef void(*FPtr2)(Object, Object);
-
 /*----------------------------------------------------------------------------*/
 /* String functions */
 
@@ -720,7 +1051,7 @@ void setstr (char* dest, const char* src) {
   }
 }
 
-int eq (char* s1, char* s2) {
+int streq (char* s1, char* s2) {
   return (strcmp(s1, s2) == 0);
 }
 
@@ -753,6 +1084,20 @@ int eq (char* s1, char* s2) {
 	$ccode .= '}'."\n\n";
 
 	##############################################################################
+	$ccode .= 'int classname2classid (char* classname) {'."\n";
+  $first = 1;
+  foreach my $classname (keys %{$self->{'classes'}}) {
+  	my $classid = $self->{'classes'}->{$classname}->{'id'};  	
+		$ccode .=
+			'  '.($first ? 'if' : 'else if').' (streq(classname, "'.$classname.'")) {'."\n".
+			'    return '.$classid.';'."\n".
+			'  }'."\n";
+  	$first = 0;
+  }
+	$ccode .= '  return -1;'."\n";
+	$ccode .= '}'."\n\n";
+
+	##############################################################################
 	$ccode .= "/*-----------------------------------------------------------*/\n";
 	$ccode .= "/* Types */\n\n";
 	my $typedefs = '';
@@ -773,6 +1118,7 @@ int eq (char* s1, char* s2) {
 		$structs .= "};\n\n";
 	}
 	$ccode .= $typedefs;
+	$ccode .= $typescode;
 	$ccode .= $structs;
 
 	##############################################################################
@@ -1014,13 +1360,21 @@ sub _generate_functions
 			$impls .=
 				'  '.($first ? '' : 'else ').'if '.
 					'('.$self->_generate_wrapper_select_clause($name).') {'."\n".
-				'    '.$functions{$fname}->{$name}->{'code'}."\n".
+				'    #if CREATE_STACK_TRACE'."\n".
+				'		   logStackTraceEntry("'.$name.'");'."\n".
+				'    #endif'."\n".
+				'    {'."\n".
+				'      '.$functions{$fname}->{$name}->{'code'}."\n".
+				'    }'."\n".
 				'  }'."\n";
 			$first = 0;
 		}
 		
 		$impls .= '  else {'."\n";
 		$impls .= '    printf("Error: Failed to find an implementation of function/method \''.$fname.'\'.\n");'."\n";
+		$impls .= '    #if CREATE_STACK_TRACE'."\n";
+		$impls .= '      printStackTrace();'."\n";
+		$impls .= '    #endif'."\n";
 		$impls .= '    printf("The parameters passed were:\n");'."\n";
 		my $p = 0;
 		for my $param (@{$first_sign->{'params'}}) {
@@ -1063,7 +1417,7 @@ sub _generate_wrapper_select_clause
 			my $class = $self->{'classes'}->{$param->[1]};
 			push @clauses, 
 				($p > 0 ?
-					'isa('.$paramname.'->classid, '.$class->{'id'}.'/* '.$paramtype.' */)' :
+					'('.$paramname.' == NULL || isa('.$paramname.'->classid, '.$class->{'id'}.'/* '.$paramtype.' */))' :
 					$paramname.'->classid == '.$class->{'id'}.'/* '.$paramtype.' */');
 		}
 		$p++;
@@ -1106,7 +1460,7 @@ sub _init
 		'top' => '',
 		'bottom' => '',
 	};
-		
+	
 	return $self;
 }
 
@@ -1154,7 +1508,7 @@ sub _add_hook_code
 		foreach my $classname (keys %{$self->{'classes'}}) {
 			my $class = $self->{'classes'}->{$classname};
 			foreach my $methname (keys %{$class->{$hooktype}}) {
-				next if $methname eq 'new';
+				next if $methname eq 'new' || $methname eq 'delete';
 				
 				my $methods = $self->_get_methods_by_name($class, $methname);
 				die "Error: $hooktype-hook for $classname.$methname cannot be installed, ".
@@ -1250,8 +1604,11 @@ sub _define_dumpers
 	foreach my $classname (keys %{$self->{'classes'}}) {
 		my $class = $self->{'classes'}->{$classname};
 		
+		my $funcsign = 'dump(self:'.$classname.',level:int,maxLevel:int):void';
+		next if exists $self->{'functions'}->{$funcsign};
+		
 		$self->func(
-			'dump(self:'.$classname.',level:int,maxLevel:int):void',
+			$funcsign,
 
 			# pre hook
 			(exists $class->{'before'}->{'dump'} ?
@@ -1289,6 +1646,9 @@ sub _define_dumpers
 						}
 						elsif ($class->{'attr'}->{$_} eq 'int') {
 							$s .= '  printf("%d\n", get'.ucfirst($_).'(self));'."\n";									
+						}
+						elsif ($class->{'attr'}->{$_} eq 'long int') {
+							$s .= '  printf("%ld\n", get'.ucfirst($_).'(self));'."\n";									
 						}
 						elsif ($class->{'attr'}->{$_} eq 'char') {
 							$s .= '  printf("%d / \'%c\'\n", get'.ucfirst($_).'(self), get'.ucfirst($_).'(self));'."\n";									
@@ -1750,6 +2110,7 @@ It takes as parameters the signature of the function and the code
     main    => 'c/main.c',
     top     => 'c/top.c',
     bottom  => 'c/bottom.c',
+    debug   => 1,
   );
 
 The generate() method generates a single ANSI C compliant source file
@@ -1782,6 +2143,14 @@ declarations.
 
 This method adds arbitrary C code to the generated C file. The code
 is added to the end of the file, but before the main function.
+
+=head4 debug => I<1/0>
+
+If the debug option is set to 1, then a stack trace is created
+and printed when a method could not be dispatched. This is handy
+for debugging but has a negative effect on the performance (due to
+the logbook that has to be maintained during runtime). Default is 0,
+so no stack trace is created and the normal message is printed.
 
 =head3 toDot()
 
